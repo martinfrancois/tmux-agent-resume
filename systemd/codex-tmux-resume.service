@@ -1,0 +1,25 @@
+[Unit]
+Description=Restore tmux and interrupted Codex and Claude sessions after reboot
+Documentation=https://learn.chatgpt.com/docs/developer-commands
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="CODEX_HOME=%h/.codex"
+Environment="CLAUDE_CONFIG_DIR=%h/.claude"
+Environment="XDG_CONFIG_HOME=%h/.config"
+Environment="XDG_STATE_HOME=%h/.local/state"
+Environment="CODEX_TMUX_RESUME_TMUX_BIN=/usr/bin/tmux"
+Environment="CODEX_TMUX_RESUME_CODEX_BIN=%h/.local/bin/codex"
+Environment="CODEX_TMUX_RESUME_CLAUDE_BIN=%h/.local/bin/claude"
+Environment="CODEX_TMUX_RESUME_TMUX_SOCKET="
+Environment="PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
+UnsetEnvironment=TMUX TMUX_PANE
+ExecStart="/usr/bin/python3" "%h/.local/libexec/codex-tmux-resume/state.py" restore
+ExecStop="/usr/bin/python3" "%h/.local/libexec/codex-tmux-resume/state.py" snapshot --reason shutdown
+TimeoutStartSec=6min
+TimeoutStopSec=30s
+KillMode=process
+
+[Install]
+WantedBy=default.target
