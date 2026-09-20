@@ -352,6 +352,49 @@ def is_codex_app_server(process_dir: Path) -> bool:
     return "app-server" in process_arguments(process_dir)[1:]
 
 
+def codex_session_id_from_file(target: Path) -> str | None:
+    """Return the conversation ID of an interactive Codex session file, or None.
+
+    Codex writes one JSON object per line under `$CODEX_HOME/sessions/`. The
+    first line is a `session_meta` record whose payload carries the ID, the
+    originator and the source. Only interactive parent sessions are restorable.
+    """
+    if target.suffix != ".jsonl" or "sessions" not in target.parts:
+        return None
+    try:
+        with target.open("r", encoding="utf-8") as handle:
+            metadata = json.loads(handle.readline())
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    payload = metadata.get("payload", {})
+    if not isinstance(payload, dict):
+        return None
+    session_id = payload.get("id")
+    if (
+        metadata.get("type") == "session_meta"
+        and payload.get("originator") in {"codex-tui", "codex_cli_rs"}
+        and isinstance(payload.get("source"), str)
+        and payload["source"] in ROOT_CODEX_SOURCES
+        and isinstance(session_id, str)
+        and UUID_RE.match(session_id)
+    ):
+        return session_id
+    return None
+
+
+def claude_session_id_from_path(target: Path) -> str | None:
+    """Return the conversation ID a Claude Code transcript path encodes, or None.
+
+    Claude Code keeps transcripts under `$CLAUDE_CONFIG_DIR/projects/` and
+    names each file after its conversation ID.
+    """
+    if target.suffix == ".jsonl" and "projects" in target.parts and UUID_RE.match(target.stem):
+        return target.stem
+    return None
+
+
 def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str | None]:
     if is_codex_app_server(process_dir):
         # The shared daemon inherits one client's TMUX_PANE while serving many
@@ -369,25 +412,9 @@ def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str 
             target = Path(os.readlink(descriptor))
         except OSError:
             continue
-        target_text = str(target)
-        if not target_text.endswith(".jsonl") or "sessions" not in target.parts:
-            continue
-        try:
-            with target.open("r", encoding="utf-8") as handle:
-                metadata = json.loads(handle.readline())
-        except (OSError, json.JSONDecodeError, UnicodeError):
-            continue
-        payload = metadata.get("payload", {})
-        session_id = payload.get("id")
-        if (
-            metadata.get("type") == "session_meta"
-            and payload.get("originator") in {"codex-tui", "codex_cli_rs"}
-            and isinstance(payload.get("source"), str)
-            and payload["source"] in ROOT_CODEX_SOURCES
-            and isinstance(session_id, str)
-            and UUID_RE.match(session_id)
-        ):
-            candidates.append((session_id, target_text))
+        session_id = codex_session_id_from_file(target)
+        if session_id:
+            candidates.append((session_id, str(target)))
     if not candidates:
         return None, None
     candidates.sort()
@@ -468,12 +495,9 @@ def root_claude_session_from_process(process_dir: Path) -> tuple[str | None, str
             target = Path(os.readlink(descriptor))
         except OSError:
             continue
-        if (
-            target.suffix == ".jsonl"
-            and "projects" in target.parts
-            and UUID_RE.match(target.stem)
-        ):
-            candidates.append((target.stem, str(target)))
+        session_id = claude_session_id_from_path(target)
+        if session_id:
+            candidates.append((session_id, str(target)))
     if candidates:
         candidates.sort()
         return candidates[0]
