@@ -996,6 +996,17 @@ def configure_hooks_command(_: argparse.Namespace) -> int:
     return 0
 
 
+def remove_hooks_command(_: argparse.Namespace) -> int:
+    for path, agent in ((CODEX_HOOKS_PATH, "codex"), (CLAUDE_SETTINGS_PATH, "claude")):
+        document = read_user_json(path)
+        if remove_managed_handlers(document):
+            atomic_write_json(path, document)
+            print(f"Removed {agent.capitalize()} hooks from {path}.")
+        else:
+            print(f"No {agent.capitalize()} hooks to remove in {path}.")
+    return 0
+
+
 def pane_launch_command(pane: dict[str, Any]) -> str | None:
     agent = "codex"
     metadata = pane.get(agent)
@@ -1430,6 +1441,9 @@ def parser() -> argparse.ArgumentParser:
 
     configure_parser = sub.add_parser("configure-hooks")
     configure_parser.set_defaults(func=configure_hooks_command)
+
+    remove_parser = sub.add_parser("remove-hooks")
+    remove_parser.set_defaults(func=remove_hooks_command)
 
     restore_parser = sub.add_parser("restore")
     restore_parser.add_argument("--dry-run", action="store_true")

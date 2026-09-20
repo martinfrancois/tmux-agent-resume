@@ -177,6 +177,23 @@ class HookConfigurationTests(unittest.TestCase):
         self.assertEqual(document, {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify-send done"}]}]}})
         self.assertFalse(state.remove_managed_handlers(document))
 
+    def test_remove_hooks_command_undoes_configure_hooks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            codex_hooks = Path(directory) / "hooks.json"
+            claude_settings = Path(directory) / "settings.json"
+            claude_settings.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}}))
+            with patch.multiple(state, CODEX_HOOKS_PATH=codex_hooks, CLAUDE_SETTINGS_PATH=claude_settings):
+                state.configure_hooks_command(argparse.Namespace())
+                self.assertIn("SessionStart", json.loads(codex_hooks.read_text())["hooks"])
+                output = captured(state.remove_hooks_command, argparse.Namespace())
+                self.assertIn("Removed Codex hooks", output)
+                self.assertEqual(json.loads(codex_hooks.read_text()), {"hooks": {}})
+                self.assertEqual(json.loads(claude_settings.read_text()),
+                                 {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "keep"}]}]}})
+                output = captured(state.remove_hooks_command, argparse.Namespace())
+                self.assertIn("No Codex hooks to remove", output)
+                self.assertIn("No Claude hooks to remove", output)
+
     def test_malformed_settings_are_not_replaced(self):
         with tempfile.TemporaryDirectory() as directory:
             settings = Path(directory) / "settings.json"

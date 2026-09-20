@@ -42,10 +42,10 @@ or let the next boot retry it.
 
 ## Verify a script change
 
-Run the regression tests beside the installed script:
+Run the tests from a checkout of this repository:
 
 ```sh
-python3 ~/.local/libexec/codex-tmux-resume/test_updates.py
+python -m pytest test_updates.py
 ```
 
 They cover updating before resuming the same conversation, skipping a second
