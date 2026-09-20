@@ -38,11 +38,22 @@ After a successful update check, Codex launches with the saved options and can
 use its shared app-server daemon. If the update fails, the prompt-suppression
 override makes that boot's managed launches use embedded mode.
 
-Codex resumes with the saved `--yolo` or
-`--dangerously-bypass-approvals-and-sandbox` flag when present. Without either,
-it uses `--dangerously-bypass-approvals-and-sandbox`, matching the original
-installation. Account for that permission mode when choosing the machine and
-user account for installation.
+Two settings in `systemd/codex-tmux-resume.service` decide how much the restored
+agents may do on their own. Both default to the safe choice.
+
+`CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE` is `inherit` by default: a resumed
+Codex conversation replays a saved bypass flag when present and otherwise uses
+the approval and sandbox settings from Codex's own config. Set it to `bypass`
+to add `--dangerously-bypass-approvals-and-sandbox` when no bypass flag was saved. Only do that on a machine and user account
+where an agent running without approvals after a reboot is acceptable.
+
+`CODEX_TMUX_RESUME_AUTO_CONTINUE` is `never` by default: conversations are
+reopened and wait for you. Set it to `interrupted` to also send the prompt from
+`CODEX_TMUX_RESUME_PROMPT` (default `continue`) to conversations that were
+mid-turn when the snapshot was taken. A Codex conversation with an active goal
+continues on its own once Codex reopens it, whatever this setting says.
+
+An unknown value stops the script with a message naming the allowed values.
 
 Codex panes may share the app-server daemon. When the TUI process does not own
 its transcript, the snapshot matches the pane's terminal title to the unique

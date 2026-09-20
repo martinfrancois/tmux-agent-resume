@@ -16,6 +16,49 @@ state = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(state)
 
 
+class SettingsTests(unittest.TestCase):
+    def test_defaults_are_the_safe_choices(self):
+        self.assertEqual(state.parse_choice({}, "X", state.CODEX_PERMISSION_MODES, "inherit"), "inherit")
+        self.assertEqual(state.parse_choice({"X": " "}, "X", state.AUTO_CONTINUE_MODES, "never"), "never")
+
+    def test_values_are_normalized_and_validated(self):
+        self.assertEqual(state.parse_choice({"X": " Bypass "}, "X", state.CODEX_PERMISSION_MODES, "inherit"), "bypass")
+        with self.assertRaises(SystemExit) as raised:
+            state.parse_choice({"X": "yes"}, "X", state.AUTO_CONTINUE_MODES, "never")
+        self.assertIn("never, interrupted", str(raised.exception))
+
+    def test_codex_resumes_without_bypass_flag_unless_configured(self):
+        args = argparse.Namespace(agent="codex", session_id="saved-conversation", cwd="/tmp",
+                                  goal_status="complete", continue_turn=False)
+        for mode, expected in (("inherit", False), ("bypass", True)):
+            with self.subTest(mode=mode), \
+                 patch.object(state, "CODEX_EXE", "/bin/true"), \
+                 patch.object(state, "CODEX_PERMISSION_MODE", mode), \
+                 patch.object(state, "prepare_codex_update"), \
+                 patch.object(state, "record_managed_launcher"), \
+                 patch.object(state, "launch_shell", return_value=0), \
+                 patch.object(state.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                state.launch_command(args)
+            command = run.call_args.args[0]
+            self.assertEqual("--dangerously-bypass-approvals-and-sandbox" in command, expected)
+            self.assertEqual(command[-2:], ["resume", "saved-conversation"])
+
+    def test_interrupted_turn_continues_only_when_configured(self):
+        pane = {"path": "/tmp", "codex": {"session_id": "saved-conversation", "was_running": True}}
+        with patch.object(state, "AUTO_CONTINUE", "never"):
+            self.assertNotIn("--continue-turn", state.pane_launch_command(pane))
+        with patch.object(state, "AUTO_CONTINUE", "interrupted"):
+            self.assertIn("--continue-turn", state.pane_launch_command(pane))
+
+    def test_launch_environment_carries_both_settings(self):
+        pane = {"path": "/tmp", "claude": {"session_id": "saved-conversation", "was_running": False}}
+        with patch.object(state, "AUTO_CONTINUE", "interrupted"), \
+             patch.object(state, "CODEX_PERMISSION_MODE", "bypass"):
+            command = state.pane_launch_command(pane)
+        self.assertIn("CODEX_TMUX_RESUME_AUTO_CONTINUE=interrupted", command)
+        self.assertIn("CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE=bypass", command)
+
+
 class UpdateTests(unittest.TestCase):
     def test_pane_title_resolves_unique_codex_thread_name(self):
         with tempfile.TemporaryDirectory() as directory:
