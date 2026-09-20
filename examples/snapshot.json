@@ -1,0 +1,87 @@
+{
+  "captured_at": "2026-09-01T10:00:00+00:00",
+  "reason": "periodic",
+  "sessions": [
+    {
+      "name": "notes",
+      "windows": [
+        {
+          "active": true,
+          "index": 0,
+          "layout": "9a1b,200x50,0,0,4",
+          "name": "shell",
+          "panes": [
+            {
+              "active": true,
+              "claude": null,
+              "codex": null,
+              "index": 0,
+              "pane_id": "%4",
+              "path": "/home/demo"
+            }
+          ],
+          "zoomed": false
+        }
+      ]
+    },
+    {
+      "name": "work",
+      "windows": [
+        {
+          "active": true,
+          "index": 0,
+          "layout": "c3f2,200x50,0,0{100x50,0,0,1,99x50,101,0,2}",
+          "name": "agents",
+          "panes": [
+            {
+              "active": true,
+              "claude": null,
+              "codex": {
+                "goal_status": null,
+                "session_id": "0f1e2d3c-4b5a-4697-8877-665544332211",
+                "transcript_path": null,
+                "was_running": true
+              },
+              "index": 0,
+              "pane_id": "%1",
+              "path": "/home/demo/project-a"
+            },
+            {
+              "active": false,
+              "claude": {
+                "session_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+                "transcript_path": "/home/demo/.claude/projects/-home-demo-project-b/a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d.jsonl",
+                "was_running": false
+              },
+              "codex": null,
+              "index": 1,
+              "pane_id": "%2",
+              "path": "/home/demo/project-b"
+            }
+          ],
+          "zoomed": false
+        },
+        {
+          "active": false,
+          "index": 1,
+          "layout": "9a1b,200x50,0,0,3",
+          "name": "logs",
+          "panes": [
+            {
+              "active": true,
+              "claude": null,
+              "codex": null,
+              "index": 0,
+              "pane_id": "%3",
+              "path": "/home/demo/project-a"
+            }
+          ],
+          "zoomed": false
+        }
+      ]
+    }
+  ],
+  "source_boot_id": "00000000-0000-4000-8000-000000000001",
+  "tmux_socket": null,
+  "version": 4
+}

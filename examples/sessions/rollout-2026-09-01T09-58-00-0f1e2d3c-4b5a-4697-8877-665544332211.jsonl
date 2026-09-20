@@ -1,0 +1,2 @@
+{"timestamp": "2026-09-01T09:58:00.000Z", "type": "session_meta", "payload": {"id": "0f1e2d3c-4b5a-4697-8877-665544332211", "timestamp": "2026-09-01T09:58:00.000Z", "cwd": "/home/demo/project-a", "originator": "codex_cli_rs", "cli_version": "0.0.0", "source": "cli"}}
+{"timestamp": "2026-09-01T09:58:05.000Z", "type": "event_msg", "payload": {"type": "user_message", "message": "Add a test for the parser"}}
