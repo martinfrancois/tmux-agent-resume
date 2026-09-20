@@ -13,6 +13,11 @@ paths differ. `%h` in a systemd unit expands to the user's home directory.
 Include any runtime directories required by your agent installation in the
 units' `PATH` values.
 
+`codex-tmux-resume.service` also sets `CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE`
+and `CODEX_TMUX_RESUME_AUTO_CONTINUE`. Leave them at `inherit` and `never`
+unless you want resumed Codex conversations to skip approvals, or want
+interrupted turns to be continued without you. The README explains both.
+
 ## Install
 
 Run these commands from the repository root as the account that owns the tmux
