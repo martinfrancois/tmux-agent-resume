@@ -59,6 +59,10 @@ conversation IDs. The restore command skips existing tmux sessions, including
 sessions whose panes have returned to a shell. Recover those panes individually
 using a known conversation ID.
 
+When replacing a restored Codex thread by hand, run `codex --no-daemon resume`
+and select the thread. The shared daemon does not expose which tmux pane owns a
+selected thread, so the snapshot cannot safely record that mapping.
+
 ## Codex updates
 
 Keep the update step and `-c check_for_update_on_startup=false` together.

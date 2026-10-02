@@ -461,6 +461,10 @@ def agent_metadata(
         and (command == agent or processes)
         and isinstance(cached_session_id, str)
         and UUID_RE.match(cached_session_id)
+        and (
+            not hook_entry.get("managed_launcher")
+            or command.startswith("python")
+        )
     ):
         # The cache is scoped by socket path, tmux server PID, and pane ID, so
         # it remains a safe fallback when procfs is restricted.

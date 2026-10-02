@@ -15,6 +15,29 @@ spec.loader.exec_module(state)
 
 
 class UpdateTests(unittest.TestCase):
+    def test_manual_codex_replacement_does_not_reuse_managed_session_id(self):
+        pane = {"pane_current_command": "codex", "pane_id": "%1"}
+        hooks = {
+            "servers": {
+                "server": {
+                    "panes": {
+                        "%1": {
+                            "agent": "codex",
+                            "session_id": "12345678-1234-1234-1234-123456789abc",
+                            "managed_launcher": True,
+                        },
+                    },
+                },
+            },
+        }
+        processes = {("server", "%1"): [Path("/proc/123")]}
+        with patch.object(state, "root_codex_session_from_process", return_value=(None, None)), \
+             patch.object(state, "pane_screen_is_busy", return_value=False):
+            metadata = state.agent_metadata("codex", pane, hooks, "server", processes)
+
+        self.assertIsNone(metadata["session_id"])
+        self.assertEqual(metadata["warning"], "session ID unavailable")
+
     def test_shared_app_server_transcript_is_not_attributed_to_its_starting_pane(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
