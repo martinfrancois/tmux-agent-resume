@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import tempfile
 import subprocess
 import unittest
@@ -15,8 +16,49 @@ spec.loader.exec_module(state)
 
 
 class UpdateTests(unittest.TestCase):
-    def test_manual_codex_replacement_does_not_reuse_managed_session_id(self):
-        pane = {"pane_current_command": "codex", "pane_id": "%1"}
+    def test_pane_title_resolves_unique_codex_thread_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT, name TEXT, rollout_path TEXT, archived INTEGER)"
+                )
+                connection.executemany(
+                    "INSERT INTO threads VALUES (?, ?, ?, 0)",
+                    [
+                        ("12345678-1234-1234-1234-123456789abc", "Security review", "/one.jsonl"),
+                        ("87654321-4321-4321-4321-cba987654321", "Other work", "/two.jsonl"),
+                    ],
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with patch.object(state, "CODEX_STATE_DB_PATH", database):
+                self.assertEqual(
+                    state.codex_session_from_pane_title("⠋ Security review | codex"),
+                    ("12345678-1234-1234-1234-123456789abc", "/one.jsonl"),
+                )
+                connection = sqlite3.connect(database)
+                try:
+                    connection.execute(
+                        "INSERT INTO threads VALUES (?, ?, ?, 0)",
+                        ("aaaaaaaa-1234-1234-1234-123456789abc", "Security review", "/three.jsonl"),
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                self.assertEqual(
+                    state.codex_session_from_pane_title("⠋ Security review | codex"),
+                    (None, None),
+                )
+
+    def test_manual_codex_replacement_prefers_pane_title_over_managed_session_id(self):
+        pane = {
+            "pane_current_command": "codex",
+            "pane_id": "%1",
+            "pane_title": "⠋ Correct thread | codex",
+        }
         hooks = {
             "servers": {
                 "server": {
@@ -32,11 +74,16 @@ class UpdateTests(unittest.TestCase):
         }
         processes = {("server", "%1"): [Path("/proc/123")]}
         with patch.object(state, "root_codex_session_from_process", return_value=(None, None)), \
+             patch.object(
+                 state,
+                 "codex_session_from_pane_title",
+                 return_value=("87654321-4321-4321-4321-cba987654321", "/correct.jsonl"),
+             ), \
              patch.object(state, "pane_screen_is_busy", return_value=False):
             metadata = state.agent_metadata("codex", pane, hooks, "server", processes)
 
-        self.assertIsNone(metadata["session_id"])
-        self.assertEqual(metadata["warning"], "session ID unavailable")
+        self.assertEqual(metadata["session_id"], "87654321-4321-4321-4321-cba987654321")
+        self.assertEqual(metadata["transcript_path"], "/correct.jsonl")
 
     def test_shared_app_server_transcript_is_not_attributed_to_its_starting_pane(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,7 +129,7 @@ class UpdateTests(unittest.TestCase):
              patch.object(state.os, "killpg") as killpg:
             process = popen.return_value
             process.wait.side_effect = [subprocess.TimeoutExpired("update", 180), -9]
-            state.prepare_codex_update("codex")
+            self.assertFalse(state.prepare_codex_update("codex"))
             killpg.assert_called_once_with(process.pid, state.signal.SIGKILL)
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
             self.assertEqual(process.wait.call_count, 2)
@@ -130,7 +177,7 @@ class UpdateTests(unittest.TestCase):
                 "if 'update' in sys.argv:\n"
                 "    ready.touch()\n"
                 "    with events.open('a') as f: f.write('updated\\n')\n"
-                "elif ready.exists() and 'check_for_update_on_startup=false' in sys.argv:\n"
+                "elif ready.exists() and 'resume' in sys.argv:\n"
                 "    with events.open('a') as f: f.write('resumed ' + sys.argv[sys.argv.index('resume') + 1] + '\\n')\n"
                 "else:\n"
                 "    with events.open('a') as f: f.write('update prompt; exited without resuming\\n')\n"
@@ -147,19 +194,19 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual(events.read_text().splitlines(),
                              ["updated", "resumed saved-conversation", "resumed saved-conversation"])
 
-    def test_codex_resume_does_not_use_shared_app_server_daemon(self):
+    def test_codex_resume_uses_shared_app_server_daemon(self):
         with tempfile.TemporaryDirectory() as directory:
             args = argparse.Namespace(agent="codex", session_id="saved-conversation", cwd=directory,
                                       goal_status="complete", continue_turn=False)
             with patch.object(state, "CODEX_EXE", "/bin/true"), \
-                 patch.object(state, "prepare_codex_update"), \
+                 patch.object(state, "prepare_codex_update", return_value=True), \
                  patch.object(state, "record_managed_launcher"), \
                  patch.object(state, "launch_shell", return_value=0), \
                  patch.object(state.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
                 state.launch_command(args)
             command = run.call_args.args[0]
-            self.assertIn("--no-daemon", command)
-            self.assertLess(command.index("--no-daemon"), command.index("resume"))
+            self.assertNotIn("--no-daemon", command)
+            self.assertNotIn("check_for_update_on_startup=false", command)
 
 
 if __name__ == "__main__":

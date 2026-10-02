@@ -22,20 +22,22 @@ blocked goals.
 Before managed Codex instances launch, the script attempts one unattended
 `codex update` per boot. A shared lock makes other panes wait for that attempt.
 If updating fails or times out, restoration proceeds with the installed
-executable. The startup update prompt is suppressed for managed launches so
-that this fallback does not block on "Update now / Skip".
+executable. That failure path suppresses the startup update prompt so the
+fallback does not block on "Update now / Skip".
 
-If updating succeeds and installs the latest version, that prompt should
-already be absent. Suppression protects the failure path and does not disable
-the preceding update attempt.
+After a successful update check, Codex launches without command-line
+configuration overrides and can use its shared app-server daemon. If the
+update fails, the prompt-suppression override makes that boot's managed
+launches use embedded mode.
 
 Codex resumes with `--dangerously-bypass-approvals-and-sandbox`, matching the
 original installation. Account for that permission mode when choosing the
 machine and user account for installation.
 
-Managed Codex resumes also use `--no-daemon`. A shared app-server daemon owns
-transcripts for several TUI clients but inherits only one tmux pane identity,
-so it cannot provide the per-pane session mapping required by snapshots.
+Codex panes may share the app-server daemon. When the TUI process does not own
+its transcript, the snapshot matches the pane's terminal title to the unique
+thread name in Codex's state database. An absent or ambiguous match is left
+unrestored instead of guessing.
 
 ## Tests
 

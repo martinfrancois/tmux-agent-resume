@@ -59,27 +59,23 @@ conversation IDs. The restore command skips existing tmux sessions, including
 sessions whose panes have returned to a shell. Recover those panes individually
 using a known conversation ID.
 
-When replacing a restored Codex thread by hand, run `codex --no-daemon resume`
-and select the thread. The shared daemon does not expose which tmux pane owns a
-selected thread, so the snapshot cannot safely record that mapping.
+Codex's default terminal title includes `thread-name`. Keep that item in
+`tui.terminal_title` so snapshots can identify manually launched or replaced
+threads that use the shared app-server daemon.
 
 ## Codex updates
 
-Keep the update step and `-c check_for_update_on_startup=false` together.
-The update runs first. Successful installation of the latest version should
-already remove the prompt. The explicit setting protects restoration when an
-update fails or exceeds the 180-second timeout, so the fallback does not stop
-at an interactive update screen.
+The update runs before any managed Codex session resumes. After a successful
+update check, the resume command has no configuration override and can use the
+shared app-server daemon. If the update fails or exceeds the 180-second
+timeout, managed launches for that boot add
+`-c check_for_update_on_startup=false`. That fallback uses embedded mode, but
+it prevents restoration from stopping at an interactive update screen.
 
 The override applies only to managed launches. It does not change the global
 Codex configuration. Failed attempts are recorded for the current boot; the
 next boot retries. See [Codex update notes](codex-updates.md) for logs and manual
 retry instructions.
-
-Managed resumes pass `--no-daemon` to Codex. Keep this option in place: the
-shared daemon serves several TUI clients while retaining only the tmux pane
-identity of the client that started it, which makes later snapshots assign
-sessions to the wrong pane or omit them.
 
 ## Recovery and maintenance
 

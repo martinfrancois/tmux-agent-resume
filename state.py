@@ -39,6 +39,7 @@ RESTORE_LOCK_PATH = STATE_DIR / "restore.lock"
 CODEX_HOOKS_PATH = CODEX_HOME / "hooks.json"
 CLAUDE_SETTINGS_PATH = CLAUDE_HOME / "settings.json"
 GOALS_DB_PATH = CODEX_HOME / "goals_1.sqlite"
+CODEX_STATE_DB_PATH = CODEX_HOME / "state_5.sqlite"
 TMUX_EXE = os.environ.get("CODEX_TMUX_RESUME_TMUX_BIN") or shutil.which("tmux") or "tmux"
 CODEX_EXE = os.environ.get("CODEX_TMUX_RESUME_CODEX_BIN") or shutil.which("codex")
 CLAUDE_EXE = os.environ.get("CODEX_TMUX_RESUME_CLAUDE_BIN") or shutil.which("claude")
@@ -379,17 +380,60 @@ def root_claude_session_from_process(process_dir: Path) -> tuple[str | None, str
 def codex_goal_status(session_id: str) -> str | None:
     if not GOALS_DB_PATH.exists():
         return None
+    connection = None
     try:
         uri = f"{GOALS_DB_PATH.resolve().as_uri()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=0.2) as connection:
-            row = connection.execute(
-                "SELECT status FROM thread_goals WHERE thread_id = ?",
-                (session_id,),
-            ).fetchone()
+        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
+        row = connection.execute(
+            "SELECT status FROM thread_goals WHERE thread_id = ?",
+            (session_id,),
+        ).fetchone()
     except (OSError, sqlite3.Error):
         return None
+    finally:
+        if connection is not None:
+            connection.close()
     status = row[0] if row else None
     return status if status in GOAL_STATUSES else None
+
+
+def pane_title_has_thread_name(pane_title: str, thread_name: str) -> bool:
+    segments = pane_title.split(" | ")
+    if thread_name in segments:
+        return True
+    if not segments or not segments[0].endswith(f" {thread_name}"):
+        return False
+    activity = segments[0][:-len(thread_name)].strip()
+    return bool(activity) and len(activity) <= 4 and not any(
+        character.isalnum() for character in activity
+    )
+
+
+def codex_session_from_pane_title(pane_title: str) -> tuple[str | None, str | None]:
+    if not pane_title or not CODEX_STATE_DB_PATH.exists():
+        return None, None
+    connection = None
+    try:
+        uri = f"{CODEX_STATE_DB_PATH.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
+        rows = connection.execute(
+            "SELECT id, rollout_path, name FROM threads "
+            "WHERE archived = 0 AND name IS NOT NULL AND name != ''"
+        ).fetchall()
+    except (OSError, sqlite3.Error):
+        return None, None
+    finally:
+        if connection is not None:
+            connection.close()
+    matches = {
+        (session_id, transcript_path)
+        for session_id, transcript_path, thread_name in rows
+        if isinstance(session_id, str)
+        and UUID_RE.match(session_id)
+        and isinstance(thread_name, str)
+        and pane_title_has_thread_name(pane_title, thread_name)
+    }
+    return next(iter(matches)) if len(matches) == 1 else (None, None)
 
 
 def pane_screen_is_busy(pane_id: str) -> bool:
@@ -456,14 +500,21 @@ def agent_metadata(
         _foreground, _hook_match, _started, session_id, transcript_path = max(
             candidates, key=lambda item: item[:3]
         )
+    if not session_id and agent == "codex":
+        session_id, transcript_path = codex_session_from_pane_title(
+            pane.get("pane_title", "")
+        )
     if (
         not session_id
         and (command == agent or processes)
         and isinstance(cached_session_id, str)
         and UUID_RE.match(cached_session_id)
         and (
-            not hook_entry.get("managed_launcher")
-            or command.startswith("python")
+            agent == "claude"
+            or (
+                hook_entry.get("managed_launcher")
+                and command.startswith("python")
+            )
         )
     ):
         # The cache is scoped by socket path, tmux server PID, and pane ID, so
@@ -506,7 +557,7 @@ def collect_snapshot(reason: str) -> dict[str, Any] | None:
         "window_id", "window_index", "window_name", "window_active", "window_zoomed_flag",
         "window_layout",
         "pane_id", "pane_index", "pane_current_path", "pane_active",
-        "pane_current_command",
+        "pane_current_command", "pane_title",
     ]
     topology = None
     for attempt in range(3):
@@ -1041,7 +1092,7 @@ def codex_resume_prompt(goal_status: str | None, continue_turn: bool) -> str | N
     return CONTINUE_PROMPT if continue_turn else None
 
 
-def prepare_codex_update(executable: str) -> None:
+def prepare_codex_update(executable: str) -> bool:
     """Attempt one unattended update per boot before any managed Codex resumes."""
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     marker = STATE_DIR / "update-boot.json"
@@ -1050,7 +1101,7 @@ def prepare_codex_update(executable: str) -> None:
         fcntl.flock(lock, fcntl.LOCK_EX)
         previous = read_json(marker, {})
         if current_boot and previous.get("boot_id") == current_boot:
-            return
+            return previous.get("status") == 0
         print("Checking for a Codex update before resuming the saved session...", flush=True)
         status = None
         try:
@@ -1074,6 +1125,7 @@ def prepare_codex_update(executable: str) -> None:
         })
         if status != 0:
             print(f"Codex update did not finish successfully; resuming the installed version. See {STATE_DIR / 'update.log'}.", file=sys.stderr)
+        return status == 0
 
 
 def launch_command(args: argparse.Namespace) -> int:
@@ -1098,15 +1150,15 @@ def launch_command(args: argparse.Namespace) -> int:
         print(f"{args.agent} executable not found; opening a shell instead", file=sys.stderr)
         return launch_shell(cwd)
     if args.agent == "codex":
-        prepare_codex_update(executable)
-        command = [
-            executable,
-            "-c", "check_for_update_on_startup=false",
+        update_succeeded = prepare_codex_update(executable)
+        command = [executable]
+        if not update_succeeded:
+            command.extend(["-c", "check_for_update_on_startup=false"])
+        command.extend([
             "--dangerously-bypass-approvals-and-sandbox",
-            "--no-daemon",
             "resume",
             args.session_id,
-        ]
+        ])
         prompt = codex_resume_prompt(goal_status, args.continue_turn)
     else:
         command = [executable, "--resume", args.session_id]
