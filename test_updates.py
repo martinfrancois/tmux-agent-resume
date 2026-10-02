@@ -1,5 +1,7 @@
 import argparse
 import importlib.util
+import json
+import os
 from pathlib import Path
 import tempfile
 import subprocess
@@ -13,6 +15,27 @@ spec.loader.exec_module(state)
 
 
 class UpdateTests(unittest.TestCase):
+    def test_shared_app_server_transcript_is_not_attributed_to_its_starting_pane(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = root / "proc" / "123"
+            descriptors = process / "fd"
+            descriptors.mkdir(parents=True)
+            transcript = root / "sessions" / "saved.jsonl"
+            transcript.parent.mkdir()
+            transcript.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "originator": "codex-tui",
+                    "source": "vscode",
+                },
+            }) + "\n")
+            (process / "cmdline").write_bytes(b"codex\0app-server\0--listen\0unix://\0")
+            os.symlink(transcript, descriptors / "7")
+
+            self.assertEqual(state.root_codex_session_from_process(process), (None, None))
+
     def test_failed_update_still_resumes_without_update_dialog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -100,6 +123,20 @@ class UpdateTests(unittest.TestCase):
                 state.launch_command(args)
             self.assertEqual(events.read_text().splitlines(),
                              ["updated", "resumed saved-conversation", "resumed saved-conversation"])
+
+    def test_codex_resume_does_not_use_shared_app_server_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = argparse.Namespace(agent="codex", session_id="saved-conversation", cwd=directory,
+                                      goal_status="complete", continue_turn=False)
+            with patch.object(state, "CODEX_EXE", "/bin/true"), \
+                 patch.object(state, "prepare_codex_update"), \
+                 patch.object(state, "record_managed_launcher"), \
+                 patch.object(state, "launch_shell", return_value=0), \
+                 patch.object(state.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                state.launch_command(args)
+            command = run.call_args.args[0]
+            self.assertIn("--no-daemon", command)
+            self.assertLess(command.index("--no-daemon"), command.index("resume"))
 
 
 if __name__ == "__main__":

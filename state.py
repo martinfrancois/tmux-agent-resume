@@ -45,6 +45,7 @@ CLAUDE_EXE = os.environ.get("CODEX_TMUX_RESUME_CLAUDE_BIN") or shutil.which("cla
 ENV_EXE = shutil.which("env") or "/usr/bin/env"
 TMUX_SOCKET = os.environ.get("CODEX_TMUX_RESUME_TMUX_SOCKET") or None
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}$")
+ROOT_CODEX_SOURCES = {"cli", "vscode"}
 BUSY_RE = re.compile(r"(?:Working.*?)?esc to interrupt", re.IGNORECASE | re.DOTALL)
 MANAGED_COMMAND_MARKER = "CODEX_TMUX_RESUME_HOOK=1"
 LEGACY_MANAGED_SCRIPT_FRAGMENT = "/.local/libexec/codex-tmux-resume/state.py"
@@ -277,6 +278,19 @@ def owns_foreground_job(process_dir: Path) -> bool:
 
 
 def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str | None]:
+    try:
+        arguments = [
+            item.decode(errors="ignore")
+            for item in (process_dir / "cmdline").read_bytes().split(b"\0")
+            if item
+        ]
+    except OSError:
+        arguments = []
+    if "app-server" in arguments[1:]:
+        # The shared daemon inherits one client's TMUX_PANE while serving many
+        # clients. Its open transcripts cannot identify the pane that owns a
+        # session.
+        return None, None
     candidates: list[tuple[str, str]] = []
     fd_dir = process_dir / "fd"
     try:
@@ -301,7 +315,7 @@ def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str 
         if (
             metadata.get("type") == "session_meta"
             and payload.get("originator") in {"codex-tui", "codex_cli_rs"}
-            and payload.get("source") == "cli"
+            and payload.get("source") in ROOT_CODEX_SOURCES
             and isinstance(session_id, str)
             and UUID_RE.match(session_id)
         ):
@@ -1085,6 +1099,7 @@ def launch_command(args: argparse.Namespace) -> int:
             executable,
             "-c", "check_for_update_on_startup=false",
             "--dangerously-bypass-approvals-and-sandbox",
+            "--no-daemon",
             "resume",
             args.session_id,
         ]

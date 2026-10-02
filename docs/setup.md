@@ -72,6 +72,11 @@ Codex configuration. Failed attempts are recorded for the current boot; the
 next boot retries. See [Codex update notes](codex-updates.md) for logs and manual
 retry instructions.
 
+Managed resumes pass `--no-daemon` to Codex. Keep this option in place: the
+shared daemon serves several TUI clients while retaining only the tmux pane
+identity of the client that started it, which makes later snapshots assign
+sessions to the wrong pane or omit them.
+
 ## Recovery and maintenance
 
 The default state directory is `~/.local/state/codex-tmux-resume`.

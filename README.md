@@ -33,6 +33,10 @@ Codex resumes with `--dangerously-bypass-approvals-and-sandbox`, matching the
 original installation. Account for that permission mode when choosing the
 machine and user account for installation.
 
+Managed Codex resumes also use `--no-daemon`. A shared app-server daemon owns
+transcripts for several TUI clients but inherits only one tmux pane identity,
+so it cannot provide the per-pane session mapping required by snapshots.
+
 ## Tests
 
 ```sh
