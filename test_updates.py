@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import sqlite3
 import tempfile
 import subprocess
@@ -105,6 +106,104 @@ class UpdateTests(unittest.TestCase):
             os.symlink(transcript, descriptors / "7")
 
             self.assertEqual(state.root_codex_session_from_process(process), (None, None))
+
+    def test_subagent_source_does_not_abort_root_session_lookup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = root / "proc" / "123"
+            descriptors = process / "fd"
+            descriptors.mkdir(parents=True)
+            transcript = root / "sessions" / "child.jsonl"
+            transcript.parent.mkdir()
+            transcript.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "originator": "codex-tui",
+                    "source": {"subagent": "review"},
+                },
+            }) + "\n")
+            (process / "cmdline").write_bytes(b"codex\0--yolo\0")
+            os.symlink(transcript, descriptors / "7")
+
+            self.assertEqual(state.root_codex_session_from_process(process), (None, None))
+
+    def test_codex_snapshot_preserves_launch_options_from_selected_root_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            process = root / "proc" / "123"
+            descriptors = process / "fd"
+            descriptors.mkdir(parents=True)
+            transcript = root / "sessions" / "root.jsonl"
+            transcript.parent.mkdir()
+            transcript.write_text(json.dumps({
+                "type": "session_meta",
+                "payload": {
+                    "id": "12345678-1234-1234-1234-123456789abc",
+                    "originator": "codex-tui",
+                    "source": "cli",
+                },
+            }) + "\n")
+            (process / "cmdline").write_bytes(
+                b"codex\0-m\0gpt-6-sol\0-c\0model_provider=openai\0"
+                b"--enable\0cli_daybreak\0--yolo\0resume\0"
+                b"12345678-1234-1234-1234-123456789abc\0"
+            )
+            os.symlink(transcript, descriptors / "7")
+            pane = {"pane_id": "%1", "pane_current_command": "codex", "pane_title": ""}
+            with patch.object(state, "owns_foreground_job", return_value=True), \
+                 patch.object(state, "process_stat", return_value=(1, 1, 1, 1)), \
+                 patch.object(state, "pane_screen_is_busy", return_value=True):
+                metadata = state.agent_metadata(
+                    "codex", pane, {"servers": {}}, "server", {("server", "%1"): [process]}
+                )
+            self.assertEqual(metadata["session_id"], "12345678-1234-1234-1234-123456789abc")
+            self.assertEqual(metadata["launch_options"], [
+                "-m", "gpt-6-sol", "-c", "model_provider=openai",
+                "--enable", "cli_daybreak", "--yolo",
+            ])
+
+    def test_codex_resume_replays_saved_launch_options(self):
+        args = argparse.Namespace(
+            agent="codex", session_id="saved-conversation", cwd="/tmp",
+            goal_status="complete", continue_turn=False,
+            launch_options=json.dumps([
+                "-m", "gpt-6-sol", "-c", "model_provider=openai",
+                "--enable", "cli_daybreak", "--yolo",
+            ]),
+        )
+        with patch.object(state, "CODEX_EXE", "/bin/true"), \
+             patch.object(state, "prepare_codex_update", return_value=True), \
+             patch.object(state, "record_managed_launcher"), \
+             patch.object(state, "launch_shell", return_value=0), \
+             patch.object(state.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            state.launch_command(args)
+        self.assertEqual(run.call_args.args[0], [
+            "/bin/true", "-m", "gpt-6-sol", "-c", "model_provider=openai",
+            "--enable", "cli_daybreak", "--yolo", "resume", "saved-conversation",
+        ])
+
+    def test_pane_launch_carries_options_to_launcher(self):
+        pane = {
+            "path": "/tmp",
+            "codex": {
+                "session_id": "12345678-1234-1234-1234-123456789abc",
+                "launch_options": ["-m", "gpt-6-sol", "--enable", "cli_daybreak"],
+            },
+        }
+        command = shlex.split(state.pane_launch_command(pane))
+        arguments = state.parser().parse_args(command[command.index("launch"):])
+        self.assertEqual(json.loads(arguments.launch_options), pane["codex"]["launch_options"])
+
+    def test_claude_permission_flag_is_preserved_without_prompt_or_token(self):
+        arguments = [
+            "--dangerously-skip-permissions", "--resume", "saved-conversation",
+            "--token", "private-value",
+        ]
+        self.assertEqual(
+            state.launch_options_from_arguments("claude", arguments),
+            ["--dangerously-skip-permissions"],
+        )
 
     def test_failed_update_still_resumes_without_update_dialog(self):
         with tempfile.TemporaryDirectory() as directory:
