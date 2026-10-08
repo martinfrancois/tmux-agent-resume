@@ -59,13 +59,18 @@ conversation IDs. The restore command skips existing tmux sessions, including
 sessions whose panes have returned to a shell. Recover those panes individually
 using a known conversation ID.
 
+Codex's default terminal title includes `thread-name`. Keep that item in
+`tui.terminal_title` so snapshots can identify manually launched or replaced
+threads that use the shared app-server daemon.
+
 ## Codex updates
 
-Keep the update step and `-c check_for_update_on_startup=false` together.
-The update runs first. Successful installation of the latest version should
-already remove the prompt. The explicit setting protects restoration when an
-update fails or exceeds the 180-second timeout, so the fallback does not stop
-at an interactive update screen.
+The update runs before any managed Codex session resumes. After a successful
+update check, the resume command has no configuration override and can use the
+shared app-server daemon. If the update fails or exceeds the 180-second
+timeout, managed launches for that boot add
+`-c check_for_update_on_startup=false`. That fallback uses embedded mode, but
+it prevents restoration from stopping at an interactive update screen.
 
 The override applies only to managed launches. It does not change the global
 Codex configuration. Failed attempts are recorded for the current boot; the

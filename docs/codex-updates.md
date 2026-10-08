@@ -4,21 +4,21 @@ This note documents the update behavior of the installed `state.py` launcher.
 
 ## Setup requirement
 
-Keep both the unattended update step and the per-launch setting
-`-c check_for_update_on_startup=false` when installing or modifying this script.
-The configured Codex executable must support `codex update`.
+Keep the unattended update step when installing or modifying this script. The
+configured Codex executable must support `codex update`.
 
 The launcher runs `codex update` with `CODEX_NON_INTERACTIVE=1` before resuming
 saved Codex conversations. It attempts the update once per boot and holds a
 shared lock while doing so. Other restored Codex panes wait for that attempt
 to finish before launching.
 
-If the update installs the latest version, the startup update prompt should
-already be absent. The explicit setting protects the failure path. If the
-update fails or exceeds 180 seconds, the launcher attempts to resume the saved
-conversation using the installed executable. Suppressing the prompt keeps that
+After a successful update check, the launcher resumes without a command-line
+configuration override, which lets Codex use its shared app-server daemon. If
+the update fails or exceeds 180 seconds, the launcher attempts to resume the
+saved conversation using the installed executable and adds
+`-c check_for_update_on_startup=false`. Suppressing the prompt keeps that
 fallback from stopping at the same "Update now / Skip" screen that interrupted
-restoration before.
+restoration before. Codex uses embedded mode for those failed-update launches.
 
 The setting applies to Codex instances started by this launcher. It does not
 change the user's global Codex configuration or disable the preceding
