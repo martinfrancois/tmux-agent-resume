@@ -39,12 +39,14 @@ RESTORE_LOCK_PATH = STATE_DIR / "restore.lock"
 CODEX_HOOKS_PATH = CODEX_HOME / "hooks.json"
 CLAUDE_SETTINGS_PATH = CLAUDE_HOME / "settings.json"
 GOALS_DB_PATH = CODEX_HOME / "goals_1.sqlite"
+CODEX_STATE_DB_PATH = CODEX_HOME / "state_5.sqlite"
 TMUX_EXE = os.environ.get("CODEX_TMUX_RESUME_TMUX_BIN") or shutil.which("tmux") or "tmux"
 CODEX_EXE = os.environ.get("CODEX_TMUX_RESUME_CODEX_BIN") or shutil.which("codex")
 CLAUDE_EXE = os.environ.get("CODEX_TMUX_RESUME_CLAUDE_BIN") or shutil.which("claude")
 ENV_EXE = shutil.which("env") or "/usr/bin/env"
 TMUX_SOCKET = os.environ.get("CODEX_TMUX_RESUME_TMUX_SOCKET") or None
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}$")
+ROOT_CODEX_SOURCES = {"cli", "vscode"}
 BUSY_RE = re.compile(r"(?:Working.*?)?esc to interrupt", re.IGNORECASE | re.DOTALL)
 MANAGED_COMMAND_MARKER = "CODEX_TMUX_RESUME_HOOK=1"
 LEGACY_MANAGED_SCRIPT_FRAGMENT = "/.local/libexec/codex-tmux-resume/state.py"
@@ -277,6 +279,19 @@ def owns_foreground_job(process_dir: Path) -> bool:
 
 
 def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str | None]:
+    try:
+        arguments = [
+            item.decode(errors="ignore")
+            for item in (process_dir / "cmdline").read_bytes().split(b"\0")
+            if item
+        ]
+    except OSError:
+        arguments = []
+    if "app-server" in arguments[1:]:
+        # The shared daemon inherits one client's TMUX_PANE while serving many
+        # clients. Its open transcripts cannot identify the pane that owns a
+        # session.
+        return None, None
     candidates: list[tuple[str, str]] = []
     fd_dir = process_dir / "fd"
     try:
@@ -301,7 +316,8 @@ def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str 
         if (
             metadata.get("type") == "session_meta"
             and payload.get("originator") in {"codex-tui", "codex_cli_rs"}
-            and payload.get("source") == "cli"
+            and isinstance(payload.get("source"), str)
+            and payload["source"] in ROOT_CODEX_SOURCES
             and isinstance(session_id, str)
             and UUID_RE.match(session_id)
         ):
@@ -310,6 +326,53 @@ def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str 
         return None, None
     candidates.sort()
     return candidates[0]
+
+
+def process_arguments(process_dir: Path) -> list[str]:
+    try:
+        return [
+            item.decode(errors="ignore")
+            for item in (process_dir / "cmdline").read_bytes().split(b"\0")
+            if item
+        ]
+    except OSError:
+        return []
+
+
+def launch_options_from_arguments(agent: str, arguments: list[str]) -> list[str]:
+    """Keep supported user options without saving prompts or credentials."""
+    options: list[str] = []
+    index = 0
+    while index < len(arguments):
+        arg = arguments[index]
+        next_arg = arguments[index + 1] if index + 1 < len(arguments) else None
+        if agent == "codex":
+            if arg in ("-m", "--model", "--profile") and next_arg and re.fullmatch(r"[A-Za-z0-9_.-]+", next_arg):
+                options.extend((arg, next_arg))
+                index += 2
+                continue
+            if arg in ("--enable", "--disable") and next_arg and re.fullmatch(r"[A-Za-z0-9_]+", next_arg):
+                options.extend((arg, next_arg))
+                index += 2
+                continue
+            if arg == "-c" and next_arg and re.fullmatch(r"model_provider=[A-Za-z0-9_-]+", next_arg):
+                options.extend((arg, next_arg))
+                index += 2
+                continue
+            if arg in ("--yolo", "--dangerously-bypass-approvals-and-sandbox"):
+                options.append(arg)
+                index += 1
+                continue
+        elif agent == "claude" and arg == "--dangerously-skip-permissions":
+            options.append(arg)
+            index += 1
+            continue
+        index += 1
+    return options
+
+
+def launch_options_from_process(agent: str, process_dir: Path) -> list[str]:
+    return launch_options_from_arguments(agent, process_arguments(process_dir)[1:])
 
 
 def session_id_from_arguments(process_dir: Path) -> str | None:
@@ -365,17 +428,60 @@ def root_claude_session_from_process(process_dir: Path) -> tuple[str | None, str
 def codex_goal_status(session_id: str) -> str | None:
     if not GOALS_DB_PATH.exists():
         return None
+    connection = None
     try:
         uri = f"{GOALS_DB_PATH.resolve().as_uri()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=0.2) as connection:
-            row = connection.execute(
-                "SELECT status FROM thread_goals WHERE thread_id = ?",
-                (session_id,),
-            ).fetchone()
+        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
+        row = connection.execute(
+            "SELECT status FROM thread_goals WHERE thread_id = ?",
+            (session_id,),
+        ).fetchone()
     except (OSError, sqlite3.Error):
         return None
+    finally:
+        if connection is not None:
+            connection.close()
     status = row[0] if row else None
     return status if status in GOAL_STATUSES else None
+
+
+def pane_title_has_thread_name(pane_title: str, thread_name: str) -> bool:
+    segments = pane_title.split(" | ")
+    if thread_name in segments:
+        return True
+    if not segments or not segments[0].endswith(f" {thread_name}"):
+        return False
+    activity = segments[0][:-len(thread_name)].strip()
+    return bool(activity) and len(activity) <= 4 and not any(
+        character.isalnum() for character in activity
+    )
+
+
+def codex_session_from_pane_title(pane_title: str) -> tuple[str | None, str | None]:
+    if not pane_title or not CODEX_STATE_DB_PATH.exists():
+        return None, None
+    connection = None
+    try:
+        uri = f"{CODEX_STATE_DB_PATH.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
+        rows = connection.execute(
+            "SELECT id, rollout_path, name FROM threads "
+            "WHERE archived = 0 AND name IS NOT NULL AND name != ''"
+        ).fetchall()
+    except (OSError, sqlite3.Error):
+        return None, None
+    finally:
+        if connection is not None:
+            connection.close()
+    matches = {
+        (session_id, transcript_path)
+        for session_id, transcript_path, thread_name in rows
+        if isinstance(session_id, str)
+        and UUID_RE.match(session_id)
+        and isinstance(thread_name, str)
+        and pane_title_has_thread_name(pane_title, thread_name)
+    }
+    return next(iter(matches)) if len(matches) == 1 else (None, None)
 
 
 def pane_screen_is_busy(pane_id: str) -> bool:
@@ -409,6 +515,7 @@ def agent_metadata(
             "session_id": hook_entry["session_id"],
             "was_running": bool(hook_entry.get("busy")),
             "transcript_path": hook_entry.get("transcript_path"),
+            "launch_options": hook_entry.get("launch_options", []),
         }
         if agent == "codex":
             metadata["goal_status"] = codex_goal_status(hook_entry["session_id"])
@@ -417,7 +524,8 @@ def agent_metadata(
     cached_session_id = hook_entry.get("session_id") if isinstance(hook_entry, dict) else None
     session_id = None
     transcript_path = None
-    candidates: list[tuple[bool, bool, int, str, str | None]] = []
+    launch_options: list[str] = []
+    candidates: list[tuple[bool, bool, int, str, str | None, list[str]]] = []
     session_reader = (
         root_codex_session_from_process
         if agent == "codex"
@@ -435,23 +543,50 @@ def agent_metadata(
             started,
             process_session_id,
             process_transcript,
+            launch_options_from_process(agent, process_dir),
         ))
     if candidates:
         # Prefer the tree that currently owns the tty, then the session
         # most recently recorded by hooks, then the newest process.
-        _foreground, _hook_match, _started, session_id, transcript_path = max(
+        _foreground, _hook_match, _started, session_id, transcript_path, launch_options = max(
             candidates, key=lambda item: item[:3]
         )
+    if not session_id and agent == "codex":
+        session_id, transcript_path = codex_session_from_pane_title(
+            pane.get("pane_title", "")
+        )
+        if session_id:
+            foreground_processes = [
+                process for process in processes
+                if "app-server" not in process_arguments(process)[1:]
+            ]
+            if foreground_processes:
+                selected = max(
+                    foreground_processes,
+                    key=lambda process: (
+                        owns_foreground_job(process),
+                        (process_stat(process) or (0, 0, 0, 0))[3],
+                    ),
+                )
+                launch_options = launch_options_from_process(agent, selected)
     if (
         not session_id
         and (command == agent or processes)
         and isinstance(cached_session_id, str)
         and UUID_RE.match(cached_session_id)
+        and (
+            agent == "claude"
+            or (
+                hook_entry.get("managed_launcher")
+                and command.startswith("python")
+            )
+        )
     ):
         # The cache is scoped by socket path, tmux server PID, and pane ID, so
         # it remains a safe fallback when procfs is restricted.
         session_id = cached_session_id
         transcript_path = hook_entry.get("transcript_path")
+        launch_options = hook_entry.get("launch_options", [])
     if command != agent and not processes:
         return None
     authoritative_hook_busy = (
@@ -475,6 +610,7 @@ def agent_metadata(
         "session_id": session_id,
         "was_running": was_running,
         "transcript_path": transcript_path,
+        "launch_options": launch_options,
     }
     if agent == "codex":
         metadata["goal_status"] = codex_goal_status(session_id)
@@ -488,7 +624,7 @@ def collect_snapshot(reason: str) -> dict[str, Any] | None:
         "window_id", "window_index", "window_name", "window_active", "window_zoomed_flag",
         "window_layout",
         "pane_id", "pane_index", "pane_current_path", "pane_active",
-        "pane_current_command",
+        "pane_current_command", "pane_title",
     ]
     topology = None
     for attempt in range(3):
@@ -643,7 +779,9 @@ def hook_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def record_managed_launcher(agent: str, session_id: str, cwd: str, busy: bool) -> None:
+def record_managed_launcher(
+    agent: str, session_id: str, cwd: str, busy: bool, launch_options: list[str],
+) -> None:
     pane_id = os.environ.get("TMUX_PANE")
     server_key = tmux_server_key(os.environ.get("TMUX"))
     if not pane_id or not server_key:
@@ -657,6 +795,7 @@ def record_managed_launcher(agent: str, session_id: str, cwd: str, busy: bool) -
             "session_id": session_id,
             "cwd": cwd,
             "busy": busy,
+            "launch_options": launch_options,
             "managed_launcher": True,
             "updated_at": now_iso(),
         }
@@ -789,6 +928,8 @@ def pane_launch_command(pane: dict[str, Any]) -> str | None:
         command.append("--continue-turn")
     if agent == "codex" and metadata.get("goal_status") in GOAL_STATUSES:
         command.extend(["--goal-status", metadata["goal_status"]])
+    if metadata.get("launch_options"):
+        command.extend(["--launch-options", json.dumps(metadata["launch_options"])])
     return shlex.join(command)
 
 
@@ -1023,7 +1164,7 @@ def codex_resume_prompt(goal_status: str | None, continue_turn: bool) -> str | N
     return CONTINUE_PROMPT if continue_turn else None
 
 
-def prepare_codex_update(executable: str) -> None:
+def prepare_codex_update(executable: str) -> bool:
     """Attempt one unattended update per boot before any managed Codex resumes."""
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     marker = STATE_DIR / "update-boot.json"
@@ -1032,7 +1173,7 @@ def prepare_codex_update(executable: str) -> None:
         fcntl.flock(lock, fcntl.LOCK_EX)
         previous = read_json(marker, {})
         if current_boot and previous.get("boot_id") == current_boot:
-            return
+            return previous.get("status") == 0
         print("Checking for a Codex update before resuming the saved session...", flush=True)
         status = None
         try:
@@ -1056,11 +1197,19 @@ def prepare_codex_update(executable: str) -> None:
         })
         if status != 0:
             print(f"Codex update did not finish successfully; resuming the installed version. See {STATE_DIR / 'update.log'}.", file=sys.stderr)
+        return status == 0
 
 
 def launch_command(args: argparse.Namespace) -> int:
     cwd = Path(restored_cwd(args.cwd))
     goal_status = args.goal_status
+    try:
+        saved_options = json.loads(getattr(args, "launch_options", "[]"))
+    except (TypeError, json.JSONDecodeError):
+        saved_options = []
+    if not isinstance(saved_options, list) or not all(isinstance(item, str) for item in saved_options):
+        saved_options = []
+    launch_options = launch_options_from_arguments(args.agent, saved_options)
     if args.agent == "codex" and goal_status is None:
         goal_status = codex_goal_status(args.session_id)
     resumes_work = (
@@ -1069,7 +1218,7 @@ def launch_command(args: argparse.Namespace) -> int:
         else goal_status == "active"
         or (args.continue_turn and goal_status not in GOAL_PROMPT_STATUSES)
     )
-    record_managed_launcher(args.agent, args.session_id, str(cwd), resumes_work)
+    record_managed_launcher(args.agent, args.session_id, str(cwd), resumes_work, launch_options)
     if resumes_work:
         host = "chatgpt.com" if args.agent == "codex" else "api.anthropic.com"
         wait_for_network(host)
@@ -1080,17 +1229,17 @@ def launch_command(args: argparse.Namespace) -> int:
         print(f"{args.agent} executable not found; opening a shell instead", file=sys.stderr)
         return launch_shell(cwd)
     if args.agent == "codex":
-        prepare_codex_update(executable)
-        command = [
-            executable,
-            "-c", "check_for_update_on_startup=false",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "resume",
-            args.session_id,
-        ]
+        update_succeeded = prepare_codex_update(executable)
+        command = [executable]
+        if not update_succeeded:
+            command.extend(["-c", "check_for_update_on_startup=false"])
+        command.extend(launch_options)
+        if not any(option in launch_options for option in ("--yolo", "--dangerously-bypass-approvals-and-sandbox")):
+            command.append("--dangerously-bypass-approvals-and-sandbox")
+        command.extend(["resume", args.session_id])
         prompt = codex_resume_prompt(goal_status, args.continue_turn)
     else:
-        command = [executable, "--resume", args.session_id]
+        command = [executable, *launch_options, "--resume", args.session_id]
         prompt = CONTINUE_PROMPT if args.continue_turn else None
     if prompt is not None:
         command.append(prompt)
@@ -1180,6 +1329,7 @@ def parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("--cwd", required=True)
     launch_parser.add_argument("--continue-turn", action="store_true")
     launch_parser.add_argument("--goal-status", choices=sorted(GOAL_STATUSES))
+    launch_parser.add_argument("--launch-options")
     launch_parser.set_defaults(func=launch_command)
 
     status_parser = sub.add_parser("status")
