@@ -16,10 +16,36 @@ state = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(state)
 
 
+SETTING_NAMES = ("CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE", "CODEX_TMUX_RESUME_AUTO_CONTINUE")
+
+
+def load_state_with_settings(**settings):
+    """Import a fresh copy of state.py, since it reads both settings at import time."""
+    environ = {name: value for name, value in os.environ.items() if name not in SETTING_NAMES}
+    environ.update(settings)
+    fresh_spec = importlib.util.spec_from_file_location("resume_state_fresh", spec.origin)
+    module = importlib.util.module_from_spec(fresh_spec)
+    with patch.dict(os.environ, environ, clear=True):
+        fresh_spec.loader.exec_module(module)
+    return module
+
+
 class SettingsTests(unittest.TestCase):
     def test_defaults_are_the_safe_choices(self):
-        self.assertEqual(state.parse_choice({}, "X", state.CODEX_PERMISSION_MODES, "inherit"), "inherit")
-        self.assertEqual(state.parse_choice({"X": " "}, "X", state.AUTO_CONTINUE_MODES, "never"), "never")
+        fresh = load_state_with_settings()
+        self.assertEqual(fresh.CODEX_PERMISSION_MODE, "inherit")
+        self.assertEqual(fresh.AUTO_CONTINUE, "never")
+
+    def test_blank_settings_fall_back_to_the_defaults(self):
+        fresh = load_state_with_settings(CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE=" ",
+                                         CODEX_TMUX_RESUME_AUTO_CONTINUE="")
+        self.assertEqual(fresh.CODEX_PERMISSION_MODE, "inherit")
+        self.assertEqual(fresh.AUTO_CONTINUE, "never")
+
+    def test_unknown_setting_stops_the_import(self):
+        with self.assertRaises(SystemExit) as raised:
+            load_state_with_settings(CODEX_TMUX_RESUME_AUTO_CONTINUE="sometimes")
+        self.assertIn("CODEX_TMUX_RESUME_AUTO_CONTINUE must be one of never, interrupted", str(raised.exception))
 
     def test_values_are_normalized_and_validated(self):
         self.assertEqual(state.parse_choice({"X": " Bypass "}, "X", state.CODEX_PERMISSION_MODES, "inherit"), "bypass")
