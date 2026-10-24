@@ -86,8 +86,12 @@ BUSY_RE = re.compile(r"(?:Working.*?)?esc to interrupt", re.IGNORECASE | re.DOTA
 MANAGED_COMMAND_MARKER = "CODEX_TMUX_RESUME_HOOK=1"
 LEGACY_MANAGED_SCRIPT_FRAGMENT = "/.local/libexec/codex-tmux-resume/state.py"
 CONTINUE_PROMPT = os.environ.get("CODEX_TMUX_RESUME_PROMPT", "continue")
-CODEX_PERMISSION_MODES = ("inherit", "bypass")
-AUTO_CONTINUE_MODES = ("never", "interrupted")
+CODEX_PERMISSION_INHERIT = "inherit"
+CODEX_PERMISSION_BYPASS = "bypass"
+CODEX_PERMISSION_MODES = (CODEX_PERMISSION_INHERIT, CODEX_PERMISSION_BYPASS)
+AUTO_CONTINUE_NEVER = "never"
+AUTO_CONTINUE_INTERRUPTED = "interrupted"
+AUTO_CONTINUE_MODES = (AUTO_CONTINUE_NEVER, AUTO_CONTINUE_INTERRUPTED)
 
 
 def parse_choice(
@@ -100,15 +104,13 @@ def parse_choice(
     return value
 
 
-# Both settings default to the safe choice. "bypass" adds
-# --dangerously-bypass-approvals-and-sandbox to every resumed Codex conversation, and
-# "interrupted" sends the continue prompt to conversations that were mid-turn at
-# snapshot time. See the README before turning either on.
+# Both default to the safe choice, because bypass and interrupted let an agent act unattended.
 CODEX_PERMISSION_MODE = parse_choice(
-    os.environ, "CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE", CODEX_PERMISSION_MODES, "inherit",
+    os.environ, "CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE", CODEX_PERMISSION_MODES,
+    CODEX_PERMISSION_INHERIT,
 )
 AUTO_CONTINUE = parse_choice(
-    os.environ, "CODEX_TMUX_RESUME_AUTO_CONTINUE", AUTO_CONTINUE_MODES, "never",
+    os.environ, "CODEX_TMUX_RESUME_AUTO_CONTINUE", AUTO_CONTINUE_MODES, AUTO_CONTINUE_NEVER,
 )
 GOAL_STATUSES = {
     "active", "paused", "blocked", "usage_limited", "budget_limited", "complete",
@@ -990,14 +992,19 @@ def configure_agent_hooks(path: Path, agent: str) -> bool:
     return True
 
 
+def agent_hook_files() -> tuple[tuple[Path, str], ...]:
+    # A function, not a constant, so tests that patch the paths reach both commands.
+    return ((CODEX_HOOKS_PATH, "codex"), (CLAUDE_SETTINGS_PATH, "claude"))
+
+
 def configure_hooks_command(_: argparse.Namespace) -> int:
-    configure_agent_hooks(CODEX_HOOKS_PATH, "codex")
-    configure_agent_hooks(CLAUDE_SETTINGS_PATH, "claude")
+    for path, agent in agent_hook_files():
+        configure_agent_hooks(path, agent)
     return 0
 
 
 def remove_hooks_command(_: argparse.Namespace) -> int:
-    for path, agent in ((CODEX_HOOKS_PATH, "codex"), (CLAUDE_SETTINGS_PATH, "claude")):
+    for path, agent in agent_hook_files():
         document = read_user_json(path)
         if remove_managed_handlers(document):
             atomic_write_json(path, document)
@@ -1046,7 +1053,7 @@ def pane_launch_command(pane: dict[str, Any]) -> str | None:
         "--cwd",
         pane.get("path") or str(HOME),
     ]
-    if metadata.get("was_running") and AUTO_CONTINUE == "interrupted":
+    if metadata.get("was_running") and AUTO_CONTINUE == AUTO_CONTINUE_INTERRUPTED:
         command.append("--continue-turn")
     if agent == "codex" and metadata.get("goal_status") in GOAL_STATUSES:
         command.extend(["--goal-status", metadata["goal_status"]])
@@ -1356,7 +1363,7 @@ def launch_command(args: argparse.Namespace) -> int:
         if not update_succeeded:
             command.extend(["-c", "check_for_update_on_startup=false"])
         command.extend(launch_options)
-        if CODEX_PERMISSION_MODE == "bypass" and not any(option in launch_options for option in CODEX_BYPASS_FLAGS):
+        if CODEX_PERMISSION_MODE == CODEX_PERMISSION_BYPASS and not any(option in launch_options for option in CODEX_BYPASS_FLAGS):
             command.append(CODEX_DEFAULT_BYPASS_FLAG)
         command.extend(["resume", args.session_id])
         prompt = codex_resume_prompt(goal_status, args.continue_turn)
