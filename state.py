@@ -616,6 +616,9 @@ def agent_metadata(
         and UUID_RE.match(cached_session_id)
         and (
             agent == "claude"
+            # Codex hooks can run inside the shared app-server daemon, which
+            # records them under the pane that started the daemon. Only a
+            # managed launcher still running in this pane wrote its own entry.
             or (
                 hook_entry.get("managed_launcher")
                 and command.startswith("python")

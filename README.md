@@ -49,6 +49,11 @@ its transcript, the snapshot matches the pane's terminal title to the unique
 thread name in Codex's state database. An absent or ambiguous match is left
 unrestored instead of guessing.
 
+For such a pane, the snapshot does not fall back to the session ID that Codex
+hooks recorded. Hooks can run inside the shared daemon, which files them under
+the pane that started the daemon, so that ID may belong to another pane. Only a
+pane where the managed launcher still runs uses its cached session ID.
+
 ## Tests
 
 ```sh
