@@ -205,6 +205,24 @@ class UpdateTests(unittest.TestCase):
             ["--dangerously-skip-permissions"],
         )
 
+    def test_codex_launch_options_accept_inline_and_short_forms(self):
+        arguments = [
+            "--model=openrouter/gpt-6-sol", "-p", "work", "--config", "model_provider=openai",
+            "--enable=cli_daybreak", "-c=model_provider=\"oss\"", "-mllama3:8b", "--yolo",
+        ]
+        self.assertEqual(state.launch_options_from_arguments("codex", arguments), [
+            "--model", "openrouter/gpt-6-sol", "-p", "work", "--config", "model_provider=openai",
+            "--enable", "cli_daybreak", "-c", "model_provider=\"oss\"", "-m", "llama3:8b", "--yolo",
+        ])
+
+    def test_codex_launch_options_drop_other_values_and_positionals(self):
+        arguments = [
+            "-c", "check_for_update_on_startup=false", "--config=model=\"o3\"",
+            "--profile=../escape", "-m", "has space", "resume", "saved-conversation",
+            "--", "--yolo",
+        ]
+        self.assertEqual(state.launch_options_from_arguments("codex", arguments), [])
+
     def test_failed_update_still_resumes_without_update_dialog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
