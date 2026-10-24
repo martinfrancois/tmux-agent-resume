@@ -1,14 +1,24 @@
 # tmux-agent-resume
 
-Restores tmux sessions after a Linux reboot and reopens the Codex or Claude Code conversation that was running in each pane.
+Restore tmux layouts and saved Codex or Claude conversations after a Linux
+reboot. A systemd user service restores the saved panes, and a timer refreshes
+the snapshot every five minutes. Agent hooks record conversation IDs and
+whether a turn was running.
 
-## What it does
+The repository contains the installed script, its regression tests, an
+invented example snapshot, and systemd unit templates. Installation paths and
+service names remain `codex-tmux-resume` for compatibility.
 
-A systemd user timer runs `state.py snapshot` every five minutes and once more at shutdown. The snapshot records every tmux session, window, layout and pane, and for each pane the conversation ID of the Codex or Claude Code process inside it and whether that conversation was mid-turn. Hooks that the script registers in Codex's `hooks.json` and Claude Code's `settings.json` report conversation starts, prompt submissions and turn ends, so the snapshot does not have to guess.
+See the [setup runbook](docs/setup.md) to install and uninstall it and the
+[Codex update notes](docs/codex-updates.md) for failure handling.
 
-At boot, `state.py restore` recreates every saved session that does not exist yet, applies the saved layouts, and starts `state.py launch` in each agent pane. The launcher runs `codex resume <id>` or `claude --resume <id>` in the saved directory. When the agent exits, the pane drops into a login shell and prints the resume command. Before the first Codex resume of a boot, the launcher runs one unattended `codex update` with a 180 second timeout and continues with the installed version if that fails. [docs/codex-updates.md](docs/codex-updates.md) covers the failure path.
+## Resume behavior
 
-Sessions that already exist at restore time are skipped whole. Panes that ran something other than an agent come back as a shell in the saved directory.
+The script restores missing tmux sessions and skips sessions that already
+exist. It reopens saved conversations by ID. It continues interrupted turns
+only when `CODEX_TMUX_RESUME_AUTO_CONTINUE` is `interrupted`.
+Codex goal handling preserves the distinction between active, paused, and
+blocked goals.
 
 Snapshots retain supported launch options from the process that owns each
 conversation. For Codex, the script saves model and profile selections, the
@@ -19,8 +29,18 @@ an attached value, as in `-mX`. For Claude, it saves `--model` in split or
 inline form and `--dangerously-skip-permissions`. It omits prompts, tokens, and other
 configuration arguments.
 
-After a successful update, managed launches use the saved options without a startup
-override. After a failed update, they suppress the startup update prompt.
+Before managed Codex instances launch, the script attempts one unattended
+`codex update` per boot. A shared lock makes other panes wait for that attempt.
+If updating fails or times out, restoration proceeds with the installed
+executable. That failure path suppresses the startup update prompt so the
+fallback does not block on "Update now / Skip".
+
+After a successful update check, Codex launches with the saved options and can
+use its shared app-server daemon. If the update fails, the prompt-suppression
+override makes that boot's managed launches use embedded mode.
+
+Codex replays a saved bypass flag when present. Without one, `inherit` uses
+Codex's own approval and sandbox settings, and `bypass` adds the bypass flag.
 
 Codex panes may share the app-server daemon. When the TUI process does not own
 its transcript, the snapshot matches the pane's terminal title to the unique
@@ -32,39 +52,10 @@ hooks recorded. Hooks can run inside the shared daemon, which files them under
 the pane that started the daemon, so that ID may belong to another pane. Only a
 pane where the managed launcher still runs uses its cached session ID.
 
-## Requirements
-
-- Linux with a systemd user manager, tmux and Python 3.10 or newer. The script reads `/proc` and uses `fcntl`, so it does not run on macOS or Windows.
-- Codex CLI, Claude Code, or both, installed and logged in for the account that owns the tmux sessions. The unit templates expect `~/.local/bin/codex`, `~/.local/bin/claude`, `/usr/bin/tmux` and `/usr/bin/python3`. Edit `systemd/*.service` before installing if your paths differ.
-- No Python packages at runtime. The tests need `pytest`, pinned in `requirements.txt`.
-
-## Install
-
-Run this from the repository root as the account that owns the tmux sessions. Back up `~/.codex/hooks.json` and `~/.claude/settings.json` first, because `configure-hooks` edits both. It keeps handlers it did not add.
-
-```sh
-install -d -m 755 ~/.local/libexec/codex-tmux-resume ~/.config/systemd/user
-install -m 755 state.py ~/.local/libexec/codex-tmux-resume/state.py
-install -m 644 systemd/*.service systemd/*.timer ~/.config/systemd/user/
-python3 ~/.local/libexec/codex-tmux-resume/state.py configure-hooks
-systemctl --user daemon-reload
-python3 ~/.local/libexec/codex-tmux-resume/state.py snapshot --reason installation
-systemctl --user enable --now codex-tmux-resume.service codex-tmux-resume.timer
-```
-
-Codex only runs hook handlers it has been told to trust. `codex --help` documents `--dangerously-bypass-hook-trust` as the way around that, which this tool does not use. Start Codex once by hand after `configure-hooks` and accept the handlers from `hooks.json` if it asks.
-
-For the restore to run at boot without a login, let the account's user manager start on its own:
-
-```sh
-loginctl enable-linger "$USER"
-```
-
-The installed paths and service names are `codex-tmux-resume`, which the script used before it also handled Claude Code.
-
 ## Configuration
 
-All settings are environment variables. The units set them; `state.py launch` passes them on into the restored panes.
+All settings are environment variables. The units set them, and
+`state.py launch` passes them on into the restored panes.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -76,26 +67,22 @@ All settings are environment variables. The units set them; `state.py launch` pa
 | `CODEX_HOME`, `CLAUDE_CONFIG_DIR` | `~/.codex`, `~/.claude` | Where the agents keep hooks, sessions and transcripts. |
 | `XDG_STATE_HOME` | `~/.local/state` | Parent of the `codex-tmux-resume` state directory. |
 
-Both `bypass` and `interrupted` mean an agent acts after a reboot without anyone at the keyboard. Turn them on only on a machine and user account where that is acceptable, by editing `~/.config/systemd/user/codex-tmux-resume.service` and running `systemctl --user daemon-reload`. A Codex conversation with an active goal continues on its own once Codex reopens it, whatever `AUTO_CONTINUE` says. An unknown value stops the script with a message naming the allowed values.
+Both `bypass` and `interrupted` mean an agent acts after a reboot without
+anyone at the keyboard. Turn them on only on a machine and user account where
+that is acceptable, by editing
+`~/.config/systemd/user/codex-tmux-resume.service` and running
+`systemctl --user daemon-reload`. A Codex conversation with an active goal
+continues on its own once Codex reopens it, whatever `AUTO_CONTINUE` says.
 
-Change `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` in both service files and in the environment of any manual `state.py` command, or the snapshot and the hooks will disagree about where state lives.
-
-## Usage
-
-```sh
-python3 ~/.local/libexec/codex-tmux-resume/state.py status
-python3 ~/.local/libexec/codex-tmux-resume/state.py restore --dry-run
-python3 ~/.local/libexec/codex-tmux-resume/state.py snapshot --reason manual
-journalctl --user -u codex-tmux-resume.service -u codex-tmux-resume-snapshot.service
-```
-
-`status` prints what the current snapshot holds. `restore --dry-run` prints which sessions a restore would create and starts none. After installing, open the tmux panes you care about and check that the next snapshot lists their conversation IDs.
-
-State lives in `~/.local/state/codex-tmux-resume`. `snapshot.json` is the current layout, `hook-state.json` holds the hook records, and `recovery/<boot-id>.json` keeps the snapshot each boot restored from. These files contain your directory paths and conversation IDs. Keep them on the machine.
+The script reads both settings when it starts. An unknown value makes every
+`state.py` command exit with a message naming the allowed values: the restore
+and the launcher, but also the snapshot timer and the agent hooks.
 
 ## Example
 
-`examples/snapshot.json` is an invented snapshot with two tmux sessions, one Codex pane and one Claude Code pane. Read it through the script without touching your own state:
+`examples/snapshot.json` is an invented snapshot with two tmux sessions, one
+Codex pane and one Claude Code pane. Read it through the script without
+touching your own state:
 
 ```sh
 XDG_STATE_HOME="$(mktemp -d)"
@@ -113,25 +100,17 @@ contents: 2 sessions, 4 panes, 1 Codex panes, 1 Claude panes, 1 active turns, 0 
 semantic hash: 3af2c0e8710f
 ```
 
-With tmux installed, `python3 state.py restore --dry-run` in the same shell prints `restore tmux session 'notes' (1 windows)` and `restore tmux session 'work' (2 windows)` for each of the two that does not already exist, and creates no session.
-
-## Uninstall
-
-```sh
-systemctl --user disable --now codex-tmux-resume.timer codex-tmux-resume.service
-rm ~/.config/systemd/user/codex-tmux-resume.service \
-   ~/.config/systemd/user/codex-tmux-resume-snapshot.service \
-   ~/.config/systemd/user/codex-tmux-resume.timer
-systemctl --user daemon-reload
-python3 ~/.local/libexec/codex-tmux-resume/state.py remove-hooks
-rm -r ~/.local/libexec/codex-tmux-resume ~/.local/state/codex-tmux-resume
-```
-
-`remove-hooks` deletes only the handlers `configure-hooks` added. Running tmux sessions and agents keep running. Run `loginctl disable-linger "$USER"` if you enabled lingering for this tool alone.
+With tmux installed, `python3 state.py restore --dry-run` in the same shell
+prints `restore tmux session 'notes' (1 windows)` and
+`restore tmux session 'work' (2 windows)` for each of the two that does not
+already exist, and creates no session.
 
 ## Agent interfaces the script depends on
 
-The script has no version check. It was written against the interfaces below, read from `state.py`, and breaks when an agent changes one of them. I confirmed the command-line flags in the help output of codex-cli 0.155.1 and Claude Code 2.1.278.
+The script has no version check. It was written against the interfaces below,
+read from `state.py`, and breaks when an agent changes one of them. I confirmed
+the command-line flags in the help output of codex-cli 0.155.1 and
+Claude Code 2.1.278.
 
 Codex CLI:
 
@@ -164,7 +143,9 @@ python -m pip install -r requirements.txt
 python -m pytest
 ```
 
-The tests use temporary directories, fake executables and the files under `examples/`. They do not start tmux, open conversations or update anything.
+The tests use temporary files, fake executables, and the files under
+`examples/`. They exercise update and resume behavior without starting tmux,
+opening real conversations, or updating Codex.
 
 ## License
 
