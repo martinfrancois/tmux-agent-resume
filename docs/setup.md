@@ -63,6 +63,13 @@ Codex's default terminal title includes `thread-name`. Keep that item in
 `tui.terminal_title` so snapshots can identify manually launched or replaced
 threads that use the shared app-server daemon.
 
+The title lookup reads thread names from `state_5.sqlite` in `CODEX_HOME`. If a
+Codex upgrade renames that database or changes its `threads` table, `status`
+prints a warning and exits with status 1, and each snapshot that contains a
+Codex pane prints the same warning to the journal. Update
+`CODEX_STATE_DB_PATH` in `state.py` when that happens. `status` also counts
+agent panes that have no session ID and will not resume.
+
 ## Codex updates
 
 The update runs before any managed Codex session resumes. After a successful
