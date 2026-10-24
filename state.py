@@ -480,6 +480,21 @@ def codex_goal_status(session_id: str) -> str | None:
     return status if status in GOAL_STATUSES else None
 
 
+def codex_state_problems() -> list[str]:
+    """Say why title lookup cannot work, so a Codex upgrade cannot turn it off silently."""
+    if not CODEX_HOME.is_dir():
+        return []
+    if not CODEX_STATE_DB_PATH.exists():
+        others = sorted(path.name for path in CODEX_HOME.glob("state_*.sqlite"))
+        found = f"; found {', '.join(others)}" if others else ""
+        return [f"Codex state database {CODEX_STATE_DB_PATH} is missing{found}"]
+    try:
+        read_only_rows(CODEX_STATE_DB_PATH, f"{CODEX_THREAD_NAMES_QUERY} LIMIT 0")
+    except (OSError, sqlite3.Error) as error:
+        return [f"Codex state database {CODEX_STATE_DB_PATH} cannot be read for thread names: {error}"]
+    return []
+
+
 def pane_title_has_thread_name(pane_title: str, thread_name: str) -> bool:
     segments = pane_title.split(CODEX_TITLE_SEPARATOR)
     if thread_name in segments:
@@ -744,12 +759,29 @@ def semantic_snapshot(value: dict[str, Any]) -> dict[str, Any]:
     return comparable
 
 
+def snapshot_panes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        pane
+        for session in snapshot.get("sessions", [])
+        for window in session.get("windows", [])
+        for pane in window.get("panes", [])
+    ]
+
+
+def warn_about_codex_state(snapshot: dict[str, Any]) -> None:
+    if not any(pane.get("codex") for pane in snapshot_panes(snapshot)):
+        return
+    for problem in codex_state_problems():
+        print(f"warning: {problem}; shared-daemon Codex panes cannot be matched by title.", file=sys.stderr)
+
+
 def snapshot_command(args: argparse.Namespace) -> int:
     with locked():
         snapshot = collect_snapshot(args.reason)
         if snapshot is None:
             print("tmux was unavailable during shutdown; retained the previous snapshot.")
             return 0
+        warn_about_codex_state(snapshot)
         previous = read_json(SNAPSHOT_PATH, {})
         if isinstance(previous, dict) and semantic_snapshot(previous) == semantic_snapshot(snapshot):
             print(f"Snapshot unchanged ({len(snapshot['sessions'])} sessions); no disk write.")
@@ -1295,24 +1327,20 @@ def status_command(_: argparse.Namespace) -> int:
     print(f"snapshot: {SNAPSHOT_PATH}")
     if isinstance(snapshot, dict) and snapshot.get("sessions") is not None:
         sessions = snapshot.get("sessions", [])
-        panes = sum(len(window.get("panes", [])) for session in sessions for window in session.get("windows", []))
-        codex_panes = sum(
-            1 for session in sessions for window in session.get("windows", [])
-            for pane in window.get("panes", []) if (pane.get("codex") or {}).get("session_id")
-        )
-        claude_panes = sum(
-            1 for session in sessions for window in session.get("windows", [])
-            for pane in window.get("panes", []) if (pane.get("claude") or {}).get("session_id")
-        )
+        all_panes = snapshot_panes(snapshot)
+        panes = len(all_panes)
+        codex_panes = sum(1 for pane in all_panes if (pane.get("codex") or {}).get("session_id"))
+        claude_panes = sum(1 for pane in all_panes if (pane.get("claude") or {}).get("session_id"))
         active_turns = sum(
-            1 for session in sessions for window in session.get("windows", [])
-            for pane in window.get("panes", [])
+            1 for pane in all_panes
             if any((pane.get(agent) or {}).get("was_running") for agent in ("codex", "claude"))
         )
         active_goals = sum(
-            1 for session in sessions for window in session.get("windows", [])
-            for pane in window.get("panes", [])
-            if (pane.get("codex") or {}).get("goal_status") == "active"
+            1 for pane in all_panes if (pane.get("codex") or {}).get("goal_status") == "active"
+        )
+        unresolved_panes = sum(
+            1 for pane in all_panes
+            if any((pane.get(agent) or {}).get("warning") for agent in ("codex", "claude"))
         )
         digest = hashlib.sha256(json.dumps(semantic_snapshot(snapshot), sort_keys=True).encode()).hexdigest()[:12]
         print(f"captured: {snapshot.get('captured_at')} ({snapshot.get('reason')})")
@@ -1322,11 +1350,16 @@ def status_command(_: argparse.Namespace) -> int:
             f"{active_turns} active turns, {active_goals} active goals"
         )
         print(f"semantic hash: {digest}")
+        if unresolved_panes:
+            print(f"warning: {unresolved_panes} agent panes have no session ID and will not resume")
     else:
         print("captured: never")
     if marker:
         print(f"last restore boot: {marker.get('boot_id')} at {marker.get('restored_at')}")
-    return 0
+    problems = codex_state_problems()
+    for problem in problems:
+        print(f"warning: {problem}")
+    return 1 if problems else 0
 
 
 def parser() -> argparse.ArgumentParser:

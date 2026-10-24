@@ -223,6 +223,58 @@ class UpdateTests(unittest.TestCase):
         ]
         self.assertEqual(state.launch_options_from_arguments("codex", arguments), [])
 
+    def test_codex_state_problems_report_renamed_or_changed_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            database = home / "state_5.sqlite"
+            with patch.object(state, "CODEX_HOME", home), \
+                 patch.object(state, "CODEX_STATE_DB_PATH", database):
+                (home / "state_6.sqlite").touch()
+                problems = state.codex_state_problems()
+                self.assertEqual(len(problems), 1)
+                self.assertIn("state_6.sqlite", problems[0])
+
+                connection = sqlite3.connect(database)
+                try:
+                    connection.execute("CREATE TABLE threads (id TEXT, rollout_path TEXT, archived INTEGER)")
+                    connection.commit()
+                finally:
+                    connection.close()
+                problems = state.codex_state_problems()
+                self.assertEqual(len(problems), 1)
+                self.assertIn("name", problems[0])
+
+                connection = sqlite3.connect(database)
+                try:
+                    connection.execute("ALTER TABLE threads ADD COLUMN name TEXT")
+                    connection.commit()
+                finally:
+                    connection.close()
+                self.assertEqual(state.codex_state_problems(), [])
+
+    def test_snapshot_warns_about_codex_state_only_with_codex_panes(self):
+        codex_snapshot = {"sessions": [{"windows": [{"panes": [{"codex": {"session_id": None}}]}]}]}
+        shell_snapshot = {"sessions": [{"windows": [{"panes": [{"codex": None, "claude": None}]}]}]}
+        with patch.object(state, "codex_state_problems", return_value=["state database is missing"]), \
+             patch("builtins.print") as output:
+            state.warn_about_codex_state(shell_snapshot)
+            self.assertFalse(output.called)
+            state.warn_about_codex_state(codex_snapshot)
+        self.assertIn("state database is missing", output.call_args.args[0])
+
+    def test_status_fails_when_codex_state_database_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with patch.object(state, "CODEX_HOME", home), \
+                 patch.object(state, "CODEX_STATE_DB_PATH", home / "state_5.sqlite"), \
+                 patch.object(state, "SNAPSHOT_PATH", home / "snapshot.json"), \
+                 patch.object(state, "RESTORE_MARKER_PATH", home / "restored-boot.json"), \
+                 patch("builtins.print") as output:
+                self.assertEqual(state.status_command(argparse.Namespace()), 1)
+            self.assertTrue(any(
+                "state_5.sqlite is missing" in str(call.args[0]) for call in output.call_args_list
+            ))
+
     def test_failed_update_still_resumes_without_update_dialog(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
