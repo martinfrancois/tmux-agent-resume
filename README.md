@@ -21,9 +21,12 @@ blocked goals.
 
 Snapshots retain supported launch options from the process that owns each
 conversation. For Codex, the script saves model and profile selections, the
-`model_provider` override, feature toggles, and the approval bypass flag. For
-Claude, it saves `--dangerously-skip-permissions`. It omits prompts, tokens,
-and other configuration arguments.
+`model_provider` override, feature toggles, and the approval bypass flag. Each
+value may follow its option as the next argument or after `=`, as in
+`--model X` and `--model=X`. The short options `-m`, `-p` and `-c` also accept
+an attached value, as in `-mX`. For Claude, it saves
+`--dangerously-skip-permissions`. It omits prompts, tokens, and other
+configuration arguments.
 
 Before managed Codex instances launch, the script attempts one unattended
 `codex update` per boot. A shared lock makes other panes wait for that attempt.

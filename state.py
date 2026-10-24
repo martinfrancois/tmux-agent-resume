@@ -49,6 +49,29 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}$")
 ROOT_CODEX_SOURCES = {"cli", "vscode"}
 CODEX_DEFAULT_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
 CODEX_BYPASS_FLAGS = ("--yolo", CODEX_DEFAULT_BYPASS_FLAG)
+CODEX_MODEL_RE = re.compile(r"[A-Za-z0-9_.:/-]+")
+CODEX_PROFILE_RE = re.compile(r"[A-Za-z0-9_.-]+")
+CODEX_FEATURE_RE = re.compile(r"[A-Za-z0-9_]+")
+CODEX_PROVIDER_OVERRIDE_RE = re.compile(r'model_provider=(?:[A-Za-z0-9_-]+|"[A-Za-z0-9_-]+")')
+# Options a snapshot keeps, mapped to the values that are safe to save. Any
+# other value, such as a prompt or a token, never reaches the snapshot.
+LAUNCH_VALUE_OPTIONS: dict[str, dict[str, re.Pattern[str]]] = {
+    "codex": {
+        "-m": CODEX_MODEL_RE,
+        "--model": CODEX_MODEL_RE,
+        "-p": CODEX_PROFILE_RE,
+        "--profile": CODEX_PROFILE_RE,
+        "--enable": CODEX_FEATURE_RE,
+        "--disable": CODEX_FEATURE_RE,
+        "-c": CODEX_PROVIDER_OVERRIDE_RE,
+        "--config": CODEX_PROVIDER_OVERRIDE_RE,
+    },
+    "claude": {},
+}
+LAUNCH_FLAGS = {
+    "codex": set(CODEX_BYPASS_FLAGS),
+    "claude": {"--dangerously-skip-permissions"},
+}
 # Codex prefixes the thread name with a spinner or status glyph of a few
 # characters; a longer prefix is other title text.
 MAX_TITLE_ACTIVITY_WIDTH = 4
@@ -346,35 +369,42 @@ def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str 
     return candidates[0]
 
 
+def inline_option_value(
+    argument: str, value_options: dict[str, re.Pattern[str]],
+) -> tuple[str, str] | None:
+    """Split --option=value, -o=value and -ovalue into option and value."""
+    name, separator, value = argument.partition("=")
+    if separator and name in value_options:
+        return name, value
+    short_name = argument[:2]
+    if not argument.startswith("--") and len(argument) > 2 and short_name in value_options:
+        return short_name, argument[2:]
+    return None
+
+
 def launch_options_from_arguments(agent: str, arguments: list[str]) -> list[str]:
     """Keep supported user options without saving prompts or credentials."""
+    value_options = LAUNCH_VALUE_OPTIONS[agent]
+    flags = LAUNCH_FLAGS[agent]
     options: list[str] = []
     index = 0
     while index < len(arguments):
-        arg = arguments[index]
-        next_arg = arguments[index + 1] if index + 1 < len(arguments) else None
-        if agent == "codex":
-            if arg in ("-m", "--model", "--profile") and next_arg and re.fullmatch(r"[A-Za-z0-9_.-]+", next_arg):
-                options.extend((arg, next_arg))
-                index += 2
-                continue
-            if arg in ("--enable", "--disable") and next_arg and re.fullmatch(r"[A-Za-z0-9_]+", next_arg):
-                options.extend((arg, next_arg))
-                index += 2
-                continue
-            if arg == "-c" and next_arg and re.fullmatch(r"model_provider=[A-Za-z0-9_-]+", next_arg):
-                options.extend((arg, next_arg))
-                index += 2
-                continue
-            if arg in CODEX_BYPASS_FLAGS:
-                options.append(arg)
-                index += 1
-                continue
-        elif agent == "claude" and arg == "--dangerously-skip-permissions":
-            options.append(arg)
+        argument = arguments[index]
+        if argument == "--":
+            break
+        if argument in flags:
+            options.append(argument)
             index += 1
             continue
-        index += 1
+        if argument in value_options:
+            option = (argument, arguments[index + 1]) if index + 1 < len(arguments) else None
+            index += 2
+        else:
+            option = inline_option_value(argument, value_options)
+            index += 1
+        if option is not None and value_options[option[0]].fullmatch(option[1]):
+            # Saved in split form so replay does not depend on how it was typed.
+            options.extend(option)
     return options
 
 
