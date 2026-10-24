@@ -47,6 +47,17 @@ ENV_EXE = shutil.which("env") or "/usr/bin/env"
 TMUX_SOCKET = os.environ.get("CODEX_TMUX_RESUME_TMUX_SOCKET") or None
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}$")
 ROOT_CODEX_SOURCES = {"cli", "vscode"}
+CODEX_DEFAULT_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+CODEX_BYPASS_FLAGS = ("--yolo", CODEX_DEFAULT_BYPASS_FLAG)
+# Codex prefixes the thread name with a spinner or status glyph of a few
+# characters; a longer prefix is other title text.
+MAX_TITLE_ACTIVITY_WIDTH = 4
+CODEX_TITLE_SEPARATOR = " | "
+SQLITE_TIMEOUT_SECONDS = 0.2
+CODEX_THREAD_NAMES_QUERY = (
+    "SELECT id, rollout_path, name FROM threads "
+    "WHERE archived = 0 AND name IS NOT NULL AND name != ''"
+)
 BUSY_RE = re.compile(r"(?:Working.*?)?esc to interrupt", re.IGNORECASE | re.DOTALL)
 MANAGED_COMMAND_MARKER = "CODEX_TMUX_RESUME_HOOK=1"
 LEGACY_MANAGED_SCRIPT_FRAGMENT = "/.local/libexec/codex-tmux-resume/state.py"
@@ -278,16 +289,23 @@ def owns_foreground_job(process_dir: Path) -> bool:
     return False
 
 
-def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str | None]:
+def process_arguments(process_dir: Path) -> list[str]:
     try:
-        arguments = [
+        return [
             item.decode(errors="ignore")
             for item in (process_dir / "cmdline").read_bytes().split(b"\0")
             if item
         ]
     except OSError:
-        arguments = []
-    if "app-server" in arguments[1:]:
+        return []
+
+
+def is_codex_app_server(process_dir: Path) -> bool:
+    return "app-server" in process_arguments(process_dir)[1:]
+
+
+def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str | None]:
+    if is_codex_app_server(process_dir):
         # The shared daemon inherits one client's TMUX_PANE while serving many
         # clients. Its open transcripts cannot identify the pane that owns a
         # session.
@@ -328,17 +346,6 @@ def root_codex_session_from_process(process_dir: Path) -> tuple[str | None, str 
     return candidates[0]
 
 
-def process_arguments(process_dir: Path) -> list[str]:
-    try:
-        return [
-            item.decode(errors="ignore")
-            for item in (process_dir / "cmdline").read_bytes().split(b"\0")
-            if item
-        ]
-    except OSError:
-        return []
-
-
 def launch_options_from_arguments(agent: str, arguments: list[str]) -> list[str]:
     """Keep supported user options without saving prompts or credentials."""
     options: list[str] = []
@@ -359,7 +366,7 @@ def launch_options_from_arguments(agent: str, arguments: list[str]) -> list[str]
                 options.extend((arg, next_arg))
                 index += 2
                 continue
-            if arg in ("--yolo", "--dangerously-bypass-approvals-and-sandbox"):
+            if arg in CODEX_BYPASS_FLAGS:
                 options.append(arg)
                 index += 1
                 continue
@@ -376,14 +383,7 @@ def launch_options_from_process(agent: str, process_dir: Path) -> list[str]:
 
 
 def session_id_from_arguments(process_dir: Path) -> str | None:
-    try:
-        arguments = [
-            item.decode(errors="ignore")
-            for item in (process_dir / "cmdline").read_bytes().split(b"\0")
-            if item
-        ]
-    except OSError:
-        return None
+    arguments = process_arguments(process_dir)
     for index, argument in enumerate(arguments):
         for option in ("--resume", "--session-id"):
             prefix = f"{option}="
@@ -425,34 +425,39 @@ def root_claude_session_from_process(process_dir: Path) -> tuple[str | None, str
     return session_id_from_arguments(process_dir), None
 
 
+def read_only_rows(path: Path, query: str, parameters: tuple[Any, ...] = ()) -> list[Any]:
+    """Run one query without writing to, or waiting long on, an agent's database."""
+    uri = f"{path.resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=SQLITE_TIMEOUT_SECONDS)
+    try:
+        return connection.execute(query, parameters).fetchall()
+    finally:
+        connection.close()
+
+
 def codex_goal_status(session_id: str) -> str | None:
     if not GOALS_DB_PATH.exists():
         return None
-    connection = None
     try:
-        uri = f"{GOALS_DB_PATH.resolve().as_uri()}?mode=ro"
-        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
-        row = connection.execute(
+        rows = read_only_rows(
+            GOALS_DB_PATH,
             "SELECT status FROM thread_goals WHERE thread_id = ?",
             (session_id,),
-        ).fetchone()
+        )
     except (OSError, sqlite3.Error):
         return None
-    finally:
-        if connection is not None:
-            connection.close()
-    status = row[0] if row else None
+    status = rows[0][0] if rows else None
     return status if status in GOAL_STATUSES else None
 
 
 def pane_title_has_thread_name(pane_title: str, thread_name: str) -> bool:
-    segments = pane_title.split(" | ")
+    segments = pane_title.split(CODEX_TITLE_SEPARATOR)
     if thread_name in segments:
         return True
     if not segments or not segments[0].endswith(f" {thread_name}"):
         return False
     activity = segments[0][:-len(thread_name)].strip()
-    return bool(activity) and len(activity) <= 4 and not any(
+    return bool(activity) and len(activity) <= MAX_TITLE_ACTIVITY_WIDTH and not any(
         character.isalnum() for character in activity
     )
 
@@ -460,19 +465,10 @@ def pane_title_has_thread_name(pane_title: str, thread_name: str) -> bool:
 def codex_session_from_pane_title(pane_title: str) -> tuple[str | None, str | None]:
     if not pane_title or not CODEX_STATE_DB_PATH.exists():
         return None, None
-    connection = None
     try:
-        uri = f"{CODEX_STATE_DB_PATH.resolve().as_uri()}?mode=ro"
-        connection = sqlite3.connect(uri, uri=True, timeout=0.2)
-        rows = connection.execute(
-            "SELECT id, rollout_path, name FROM threads "
-            "WHERE archived = 0 AND name IS NOT NULL AND name != ''"
-        ).fetchall()
+        rows = read_only_rows(CODEX_STATE_DB_PATH, CODEX_THREAD_NAMES_QUERY)
     except (OSError, sqlite3.Error):
         return None, None
-    finally:
-        if connection is not None:
-            connection.close()
     matches = {
         (session_id, transcript_path)
         for session_id, transcript_path, thread_name in rows
@@ -557,8 +553,7 @@ def agent_metadata(
         )
         if session_id:
             foreground_processes = [
-                process for process in processes
-                if "app-server" not in process_arguments(process)[1:]
+                process for process in processes if not is_codex_app_server(process)
             ]
             if foreground_processes:
                 selected = max(
@@ -1234,8 +1229,8 @@ def launch_command(args: argparse.Namespace) -> int:
         if not update_succeeded:
             command.extend(["-c", "check_for_update_on_startup=false"])
         command.extend(launch_options)
-        if not any(option in launch_options for option in ("--yolo", "--dangerously-bypass-approvals-and-sandbox")):
-            command.append("--dangerously-bypass-approvals-and-sandbox")
+        if not any(option in launch_options for option in CODEX_BYPASS_FLAGS):
+            command.append(CODEX_DEFAULT_BYPASS_FLAG)
         command.extend(["resume", args.session_id])
         prompt = codex_resume_prompt(goal_status, args.continue_turn)
     else:
