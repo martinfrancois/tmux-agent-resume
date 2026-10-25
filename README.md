@@ -24,8 +24,8 @@ conversation. For Codex, the script saves model and profile selections, the
 `model_provider` override, feature toggles, and the approval bypass flag. Each
 value may follow its option as the next argument or after `=`, as in
 `--model X` and `--model=X`. The short options `-m`, `-p` and `-c` also accept
-an attached value, as in `-mX`. For Claude, it saves
-`--dangerously-skip-permissions`. It omits prompts, tokens, and other
+an attached value, as in `-mX`. For Claude, it saves `--model` in split or
+inline form and `--dangerously-skip-permissions`. It omits prompts, tokens, and other
 configuration arguments.
 
 Before managed Codex instances launch, the script attempts one unattended
