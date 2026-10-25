@@ -38,9 +38,9 @@ documents `--dangerously-bypass-hook-trust` as the way around that, which this
 tool does not use. Start Codex once by hand after `configure-hooks` and accept
 the handlers from `hooks.json` if it asks.
 
-The installed service neither bypasses Codex approvals nor continues
-interrupted turns. The [Configuration](../README.md#configuration) section of
-the README lists the settings that turn either on.
+By default, restoration preserves a saved bypass flag but adds none when the
+snapshot has no such flag. It does not continue interrupted turns. The
+[Configuration](../README.md#configuration) section lists the overrides.
 
 To start the user service at boot without waiting for a login, enable lingering
 for the account. This command requires the host's authorization:
@@ -72,11 +72,11 @@ The regression tests run from a checkout of this repository, as the
 
 ## Codex updates
 
-Keep the update step and `-c check_for_update_on_startup=false` together.
-The update runs first. Successful installation of the latest version should
-already remove the prompt. The explicit setting protects restoration when an
-update fails or exceeds the 180-second timeout, so the fallback does not stop
-at an interactive update screen.
+The update runs first. A successful update resumes without a configuration
+override, allowing Codex to use its shared app-server daemon. If the update
+fails or exceeds the 180-second timeout, the launcher adds
+`-c check_for_update_on_startup=false` so the fallback does not stop at an
+interactive update screen.
 
 The override applies only to managed launches. It does not change the global
 Codex configuration. Failed attempts are recorded for the current boot; the

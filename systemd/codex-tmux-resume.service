@@ -13,12 +13,7 @@ Environment="CODEX_TMUX_RESUME_TMUX_BIN=/usr/bin/tmux"
 Environment="CODEX_TMUX_RESUME_CODEX_BIN=%h/.local/bin/codex"
 Environment="CODEX_TMUX_RESUME_CLAUDE_BIN=%h/.local/bin/claude"
 Environment="CODEX_TMUX_RESUME_TMUX_SOCKET="
-# inherit: resumed Codex conversations use the approval and sandbox settings from
-# Codex's own config. bypass: adds --dangerously-bypass-approvals-and-sandbox.
-Environment="CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE=inherit"
-# never: reopen conversations and wait for you. interrupted: also send the
-# continue prompt to conversations that were mid-turn when the snapshot was taken.
-Environment="CODEX_TMUX_RESUME_AUTO_CONTINUE=never"
+# See the README Configuration section for permission and auto-continue overrides.
 Environment="PATH=%h/.local/bin:%h/bin:%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin"
 UnsetEnvironment=TMUX TMUX_PANE
 ExecStart="/usr/bin/python3" "%h/.local/libexec/codex-tmux-resume/state.py" restore

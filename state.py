@@ -1005,13 +1005,18 @@ def configure_hooks_command(_: argparse.Namespace) -> int:
 
 def remove_hooks_command(_: argparse.Namespace) -> int:
     for path, agent in agent_hook_files():
-        document = read_user_json(path)
-        if remove_managed_handlers(document):
-            atomic_write_json(path, document)
-            print(f"Removed {agent.capitalize()} hooks from {path}.")
-        else:
-            print(f"No {agent.capitalize()} hooks to remove in {path}.")
+        remove_agent_hooks(path, agent)
     return 0
+
+
+def remove_agent_hooks(path: Path, agent: str) -> bool:
+    document = read_user_json(path)
+    if not remove_managed_handlers(document):
+        print(f"No {agent.capitalize()} hooks to remove in {path}.")
+        return False
+    atomic_write_json(path, document)
+    print(f"Removed {agent.capitalize()} hooks from {path}.")
+    return True
 
 
 def pane_launch_command(pane: dict[str, Any]) -> str | None:
