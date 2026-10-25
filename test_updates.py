@@ -205,6 +205,17 @@ class UpdateTests(unittest.TestCase):
             ["--dangerously-skip-permissions"],
         )
 
+    def test_claude_model_is_preserved_in_split_and_inline_forms(self):
+        for arguments in (["--model", "sonnet"], ["--model=sonnet"]):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    state.launch_options_from_arguments("claude", arguments),
+                    ["--model", "sonnet"],
+                )
+        self.assertEqual(
+            state.launch_options_from_arguments("claude", ["--model", "bad value"]), []
+        )
+
     def test_codex_launch_options_accept_inline_and_short_forms(self):
         arguments = [
             "--model=openrouter/gpt-6-sol", "-p", "work", "--config", "model_provider=openai",

@@ -39,6 +39,7 @@ RESTORE_LOCK_PATH = STATE_DIR / "restore.lock"
 CODEX_HOOKS_PATH = CODEX_HOME / "hooks.json"
 CLAUDE_SETTINGS_PATH = CLAUDE_HOME / "settings.json"
 GOALS_DB_PATH = CODEX_HOME / "goals_1.sqlite"
+# Replace this internal lookup when a supported pane-to-thread mapping exists: https://github.com/martinfrancois/tmux-agent-resume/issues/4
 CODEX_STATE_DB_PATH = CODEX_HOME / "state_5.sqlite"
 TMUX_EXE = os.environ.get("CODEX_TMUX_RESUME_TMUX_BIN") or shutil.which("tmux") or "tmux"
 CODEX_EXE = os.environ.get("CODEX_TMUX_RESUME_CODEX_BIN") or shutil.which("codex")
@@ -66,7 +67,7 @@ LAUNCH_VALUE_OPTIONS: dict[str, dict[str, re.Pattern[str]]] = {
         "-c": CODEX_PROVIDER_OVERRIDE_RE,
         "--config": CODEX_PROVIDER_OVERRIDE_RE,
     },
-    "claude": {},
+    "claude": {"--model": CODEX_MODEL_RE},
 }
 LAUNCH_FLAGS = {
     "codex": set(CODEX_BYPASS_FLAGS),
