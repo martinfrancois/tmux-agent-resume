@@ -26,8 +26,17 @@ conversation. For Codex, the script saves model and profile selections, the
 value may follow its option as the next argument or after `=`, as in
 `--model X` and `--model=X`. The short options `-m`, `-p` and `-c` also accept
 an attached value, as in `-mX`. For Claude, it saves `--model` in split or
-inline form and `--dangerously-skip-permissions`. It omits prompts, tokens, and other
-configuration arguments.
+inline form, `--permission-mode`, and `--dangerously-skip-permissions`. It
+omits prompts, tokens, and other configuration arguments.
+
+Claude hooks also record the permission mode reported at prompt submission
+and turn completion. That mode overrides the original launch options for the
+same conversation, including a switch out of bypass mode. Without a recorded
+mode, the snapshot uses the conversation's process options. When only hooks
+identify a fresh conversation, it reads options from the single foreground
+Claude process in that pane. An ambiguous process match supplies no options.
+This works with direct commands, aliases, and wrappers; no alias name is
+required. It never adds bypass merely because another pane uses it.
 
 Before managed Codex instances launch, the script attempts one unattended
 `codex update` per boot. A shared lock makes other panes wait for that attempt.
@@ -108,9 +117,9 @@ already exist, and creates no session.
 ## Agent interfaces the script depends on
 
 The script has no version check. It was written against the interfaces below,
-read from `state.py`, and breaks when an agent changes one of them. I confirmed
-the command-line flags in the help output of codex-cli 0.155.1 and
-Claude Code 2.1.278.
+read from `state.py`, and breaks when an agent changes one of them. The
+command-line flags were checked against the help output of codex-cli 0.155.1
+and Claude Code 2.1.314.
 
 Codex CLI:
 
@@ -125,6 +134,7 @@ Claude Code:
 
 - `claude --resume <uuid> [prompt]`, and `--resume`, `-r` or `--session-id` on the command line of a running process.
 - `$CLAUDE_CONFIG_DIR/settings.json` hooks for `SessionStart` (matcher `startup|resume|clear|compact`), `UserPromptSubmit` and `Stop`, with the `Stop` handler printing `{}`.
+- The [`permission_mode` hook field](https://code.claude.com/docs/en/hooks#common-input-fields), when present. Accepted values are `default`, `manual`, `plan`, `acceptEdits`, `auto`, `dontAsk`, and `bypassPermissions`.
 - Transcripts under `$CLAUDE_CONFIG_DIR/projects/` named `<uuid>.jsonl`.
 
 ## Limitations
@@ -133,6 +143,7 @@ Claude Code:
 - A session that exists at restore time is skipped as a whole, even if some of its panes are back at a shell. Resume those by hand with the printed command.
 - Layouts are restored by pane count and position. A window whose pane sizes fall below tmux's minimum keeps the tiled layout.
 - Busy detection for conversations without hook records reads the last 20 screen lines, so a conversation that hides that text is treated as idle.
+- Claude mode changes made inside the UI are recorded on the next prompt submission or turn completion. A change followed immediately by a reboot has no hook record. Old snapshots that already lost the bypass setting cannot reconstruct it.
 - The Codex update step is a single attempt per boot. A stuck installer is killed after 180 seconds.
 
 ## Tests

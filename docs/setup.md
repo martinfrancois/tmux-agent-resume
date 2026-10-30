@@ -42,6 +42,16 @@ By default, restoration preserves a saved bypass flag but adds none when the
 snapshot has no such flag. It does not continue interrupted turns. The
 [Configuration](../README.md#configuration) section lists the overrides.
 
+For Claude, launch with `claude --dangerously-skip-permissions` or
+`claude --permission-mode bypassPermissions` when bypass is intended.
+An alias or wrapper that passes these options works too. The snapshot keeps
+the choice separately for each conversation. Hooks record subsequent mode
+changes on prompt submission and turn completion, including leaving bypass.
+When upgrading an installation whose old snapshots lost this choice, select
+the intended mode again in each affected Claude session and submit a prompt
+before the next reboot. Installing the script cannot recover a setting that
+was never saved.
+
 To start the user service at boot without waiting for a login, enable lingering
 for the account. This command requires the host's authorization:
 
