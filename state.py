@@ -54,6 +54,7 @@ CODEX_MODEL_RE = re.compile(r"[A-Za-z0-9_.:/-]+")
 CODEX_PROFILE_RE = re.compile(r"[A-Za-z0-9_.-]+")
 CODEX_FEATURE_RE = re.compile(r"[A-Za-z0-9_]+")
 CODEX_PROVIDER_OVERRIDE_RE = re.compile(r'model_provider=(?:[A-Za-z0-9_-]+|"[A-Za-z0-9_-]+")')
+CLAUDE_PERMISSION_MODE_RE = re.compile(r"default|manual|plan|acceptEdits|auto|dontAsk|bypassPermissions")
 # Options a snapshot keeps, mapped to the values that are safe to save. Any
 # other value, such as a prompt or a token, never reaches the snapshot.
 LAUNCH_VALUE_OPTIONS: dict[str, dict[str, re.Pattern[str]]] = {
@@ -67,7 +68,7 @@ LAUNCH_VALUE_OPTIONS: dict[str, dict[str, re.Pattern[str]]] = {
         "-c": CODEX_PROVIDER_OVERRIDE_RE,
         "--config": CODEX_PROVIDER_OVERRIDE_RE,
     },
-    "claude": {"--model": CODEX_MODEL_RE},
+    "claude": {"--model": CODEX_MODEL_RE, "--permission-mode": CLAUDE_PERMISSION_MODE_RE},
 }
 LAUNCH_FLAGS = {
     "codex": set(CODEX_BYPASS_FLAGS),
@@ -466,6 +467,22 @@ def launch_options_from_process(agent: str, process_dir: Path) -> list[str]:
     return launch_options_from_arguments(agent, process_arguments(process_dir)[1:])
 
 
+def claude_options_with_permission_mode(options: list[str], mode: Any) -> list[str]:
+    """Let a matching hook's current mode override the original launch mode."""
+    if not isinstance(mode, str) or not CLAUDE_PERMISSION_MODE_RE.fullmatch(mode):
+        return options
+    retained = []
+    arguments = iter(launch_options_from_arguments("claude", options))
+    for argument in arguments:
+        if argument == "--permission-mode":
+            next(arguments, None)
+        elif argument != "--dangerously-skip-permissions":
+            retained.append(argument)
+    if mode == "bypassPermissions":
+        return [*retained, "--dangerously-skip-permissions"]
+    return [*retained, "--permission-mode", mode]
+
+
 def session_id_from_arguments(process_dir: Path) -> str | None:
     arguments = process_arguments(process_dir)
     for index, argument in enumerate(arguments):
@@ -681,6 +698,12 @@ def agent_metadata(
         session_id = cached_session_id
         transcript_path = hook_entry.get("transcript_path")
         launch_options = hook_entry.get("launch_options", [])
+        if agent == "claude":
+            # Fresh Claude sessions often close their transcript between writes
+            # and have no --resume ID. Use only an unambiguous foreground process.
+            foreground = [process for process in processes if owns_foreground_job(process)]
+            if len(foreground) == 1:
+                launch_options = launch_options_from_process(agent, foreground[0])
     if command != agent and not processes:
         return None
     authoritative_hook_busy = (
@@ -692,6 +715,11 @@ def agent_metadata(
 
     if not session_id:
         return {"session_id": None, "was_running": pane_screen_is_busy(pane_id), "warning": "session ID unavailable"}
+
+    if agent == "claude" and cached_session_id == session_id:
+        launch_options = claude_options_with_permission_mode(
+            launch_options, hook_entry.get("permission_mode"),
+        )
 
     # A matching hook is authoritative, including an idle Stop event. Screen
     # scraping is only for sessions that predate hooks or lost hook delivery.
@@ -863,6 +891,12 @@ def hook_command(args: argparse.Namespace) -> int:
             panes = server.setdefault("panes", {})
             entry = panes.get(pane_id, {})
             previous_session_id = entry.get("session_id")
+            if previous_session_id != session_id or entry.get("agent") != args.agent:
+                entry = {}
+            elif event_name == "SessionStart" and event.get("source") != "compact":
+                entry.pop("permission_mode", None)
+                if not entry.get("managed_launcher"):
+                    entry.pop("launch_options", None)
             entry.update({
                 "agent": args.agent,
                 "session_id": session_id,
@@ -870,6 +904,9 @@ def hook_command(args: argparse.Namespace) -> int:
                 "transcript_path": event.get("transcript_path"),
                 "updated_at": now_iso(),
             })
+            mode = event.get("permission_mode")
+            if args.agent == "claude" and isinstance(mode, str) and CLAUDE_PERMISSION_MODE_RE.fullmatch(mode):
+                entry["permission_mode"] = mode
             if event_name == "SessionStart":
                 source = event.get("source")
                 if source != "compact" or previous_session_id != session_id:
