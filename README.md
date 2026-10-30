@@ -55,11 +55,18 @@ Codex panes may share the app-server daemon. When the TUI process does not own
 its transcript, the snapshot matches the pane's terminal title to the unique
 thread name in Codex's state database. An absent or ambiguous match is left
 unrestored instead of guessing.
+The supported title layout is `<thread name> | codex`, optionally preceded by
+Codex's activity glyph. Fixed title segments do not identify a conversation;
+other layouts remain unidentified unless process metadata supplies the ID.
 
 For such a pane, the snapshot does not fall back to the session ID that Codex
 hooks recorded. Hooks can run inside the shared daemon, which files them under
 the pane that started the daemon, so that ID may belong to another pane. Only a
 pane where the managed launcher still runs uses its cached session ID.
+The snapshot verifies the launcher's PID, process start time, command and pane
+ancestry, so interpreter names such as `pypy3` work without trusting unrelated
+Python processes. Older hook entries without process identity are not used for
+a waiting launcher; newly started managed launchers record that identity.
 
 ## Configuration
 

@@ -85,7 +85,128 @@ class SettingsTests(unittest.TestCase):
         self.assertIn("CODEX_TMUX_RESUME_CODEX_PERMISSION_MODE=bypass", command)
 
 
+class ManagedLauncherTests(unittest.TestCase):
+    session_id = "12345678-1234-1234-1234-123456789abc"
+
+    def setUp(self):
+        self.entry = {
+            "agent": "codex", "managed_launcher": True, "session_id": self.session_id,
+            "busy": True, "launcher_pid": 123, "launcher_start_ticks": 456,
+        }
+        self.hooks = {"servers": {"server": {"panes": {"%1": self.entry}}}}
+        self.pane = {"pane_id": "%1", "pane_pid": "100", "pane_title": "",
+                     "pane_current_command": "pypy3"}
+        self.arguments = ["/synthetic/pypy3", str(Path(state.__file__).resolve()),
+                          "launch", "--agent", "codex", "--session-id", self.session_id]
+        self.statuses = {"123": (100, 123, 123, 456), "100": (1, 100, 123, 10)}
+        for name, kwargs in (
+            ("process_stat", {"side_effect": lambda path: self.statuses.get(path.name)}),
+            ("process_arguments", {"side_effect": lambda path: self.arguments}),
+            ("owns_foreground_job", {"return_value": True}),
+            ("codex_session_from_pane_title", {"return_value": (None, None)}),
+            ("codex_goal_status", {"return_value": None}),
+            ("pane_screen_is_busy", {"return_value": False}),
+        ):
+            patcher = patch.object(state, name, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def metadata(self, processes=None):
+        return state.agent_metadata("codex", self.pane, self.hooks, "server", processes or {})
+
+    def test_waiting_launcher_identity_is_independent_of_interpreter_name(self):
+        for command in ("python3", "pypy3", "custom-python"):
+            with self.subTest(command=command):
+                self.pane["pane_current_command"] = command
+                self.arguments[0] = f"/synthetic/{command}"
+                metadata = self.metadata()
+                self.assertIsNotNone(metadata)
+                self.assertEqual(metadata["session_id"], self.session_id)
+                self.assertTrue(metadata["was_running"])
+
+    def test_replaced_process_and_returned_shell_reject_stale_hook(self):
+        self.pane["pane_current_command"] = "python3"
+        for arguments in (["/bin/bash", "-l"], ["python3", "unrelated.py"]):
+            with self.subTest(arguments=arguments):
+                self.arguments = arguments
+                self.assertIsNone(self.metadata())
+
+    def test_reused_pid_or_different_pane_rejects_stale_hook(self):
+        self.pane["pane_current_command"] = "python3"
+        for status in ((100, 123, 123, 999), (999, 123, 123, 456), None):
+            with self.subTest(status=status):
+                self.statuses["123"] = status
+                self.assertIsNone(self.metadata())
+
+    def test_unverified_legacy_hook_is_not_a_launcher_identity(self):
+        self.pane["pane_current_command"] = "python3"
+        del self.entry["launcher_pid"]
+        self.assertIsNone(self.metadata())
+
+    def test_background_launcher_does_not_claim_foreground_pane(self):
+        self.pane["pane_current_command"] = "python3"
+        with patch.object(state, "owns_foreground_job", return_value=False):
+            self.assertIsNone(self.metadata())
+
+    def test_recorded_launcher_keeps_process_identity(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"TMUX_PANE": "%1", "TMUX": "/synthetic/socket,100,0"}), \
+             patch.object(state, "tmux_server_key", return_value="server"), \
+             patch.object(state.os, "getpid", return_value=123), \
+             patch.object(state, "LOCK_PATH", Path(directory) / "lock"), \
+             patch.object(state, "HOOK_STATE_PATH", Path(directory) / "hooks.json"):
+            state.record_managed_launcher("codex", self.session_id, directory, True, [])
+            entry = json.loads((Path(directory) / "hooks.json").read_text())["servers"]["server"]["panes"]["%1"]
+        self.assertEqual(entry["launcher_pid"], 123)
+        self.assertEqual(entry["launcher_start_ticks"], 456)
+
+    def test_live_agent_child_takes_precedence(self):
+        other = "87654321-4321-4321-4321-cba987654321"
+        with patch.object(state, "root_codex_session_from_process", return_value=(other, "/other.jsonl")):
+            metadata = self.metadata({("server", "%1"): [Path("/proc/124")]})
+        self.assertEqual(metadata["session_id"], other)
+        self.assertFalse(metadata["was_running"])
+
+    def test_verified_launcher_retains_identity_with_shared_daemon_only(self):
+        with patch.object(state, "root_codex_session_from_process", return_value=(None, None)):
+            metadata = self.metadata({("server", "%1"): [Path("/proc/124")]})
+        self.assertEqual(metadata["session_id"], self.session_id)
+
+
 class UpdateTests(unittest.TestCase):
+    def test_title_lookup_does_not_match_fixed_or_partial_segments(self):
+        wrong = "12345678-1234-1234-1234-123456789abc"
+        right = "87654321-4321-4321-4321-cba987654321"
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "CREATE TABLE threads (id TEXT, name TEXT, rollout_path TEXT, archived INTEGER)"
+                )
+                connection.execute("INSERT INTO threads VALUES (?, ?, ?, 0)",
+                                   (wrong, "codex", "/wrong.jsonl"))
+            with patch.object(state, "CODEX_STATE_DB_PATH", database):
+                self.assertEqual(state.codex_session_from_pane_title("Actual work | codex"),
+                                 (None, None))
+                with sqlite3.connect(database) as connection:
+                    connection.execute("INSERT INTO threads VALUES (?, ?, ?, 0)",
+                                       (right, "Actual work", "/right.jsonl"))
+                for title in ("Actual work | codex", "⠋ Actual work | codex"):
+                    with self.subTest(title=title):
+                        self.assertEqual(state.codex_session_from_pane_title(title),
+                                         (right, "/right.jsonl"))
+                self.assertEqual(state.codex_session_from_pane_title("codex | codex"),
+                                 (wrong, "/wrong.jsonl"))
+                for title in ("folder | Actual work | codex", "Actual work | other app"):
+                    with self.subTest(title=title):
+                        self.assertEqual(state.codex_session_from_pane_title(title),
+                                         (None, None))
+                with sqlite3.connect(database) as connection:
+                    connection.execute("INSERT INTO threads VALUES (?, ?, ?, 1)",
+                                       (wrong, "Actual work", "/archived.jsonl"))
+                self.assertEqual(state.codex_session_from_pane_title("Actual work | codex"),
+                                 (right, "/right.jsonl"))
+
     def test_pane_title_resolves_unique_codex_thread_name(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "state.sqlite"

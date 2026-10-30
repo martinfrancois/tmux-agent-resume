@@ -564,12 +564,15 @@ def codex_state_problems() -> list[str]:
 
 
 def pane_title_has_thread_name(pane_title: str, thread_name: str) -> bool:
-    segments = pane_title.split(CODEX_TITLE_SEPARATOR)
-    if thread_name in segments:
-        return True
-    if not segments or not segments[0].endswith(f" {thread_name}"):
+    suffix = f"{CODEX_TITLE_SEPARATOR}codex"
+    if not pane_title.endswith(suffix):
         return False
-    activity = segments[0][:-len(thread_name)].strip()
+    title_name = pane_title[:-len(suffix)]
+    if title_name == thread_name:
+        return True
+    if not title_name.endswith(f" {thread_name}"):
+        return False
+    activity = title_name[:-len(thread_name)].strip()
     return bool(activity) and len(activity) <= MAX_TITLE_ACTIVITY_WIDTH and not any(
         character.isalnum() for character in activity
     )
@@ -598,6 +601,45 @@ def pane_screen_is_busy(pane_id: str) -> bool:
     return result.returncode == 0 and bool(BUSY_RE.search(result.stdout))
 
 
+def managed_launcher_matches_pane(
+    agent: str, pane: dict[str, str], entry: Any,
+) -> bool:
+    """Verify the recorded launcher process still owns this pane's foreground job."""
+    if not isinstance(entry, dict) or not entry.get("managed_launcher"):
+        return False
+    pid = entry.get("launcher_pid")
+    started = entry.get("launcher_start_ticks")
+    session_id = entry.get("session_id")
+    pane_pid = pane.get("pane_pid", "")
+    if (
+        not isinstance(pid, int) or pid <= 0
+        or not isinstance(started, int)
+        or not isinstance(session_id, str) or not UUID_RE.match(session_id)
+        or not pane_pid.isdigit()
+    ):
+        return False
+    process = Path("/proc") / str(pid)
+    status = process_stat(process)
+    if status is None or status[3] != started:
+        return False
+    arguments = process_arguments(process)
+    expected = [str(Path(__file__).resolve()), "launch", "--agent", agent,
+                "--session-id", session_id]
+    if arguments[1:7] != expected or not owns_foreground_job(process):
+        return False
+    # A stale entry must not follow a reused PID or a launcher in another pane.
+    visited = set()
+    while pid > 1 and pid not in visited:
+        if pid == int(pane_pid):
+            return True
+        visited.add(pid)
+        status = process_stat(Path("/proc") / str(pid))
+        if status is None:
+            break
+        pid = status[0]
+    return False
+
+
 def agent_metadata(
     agent: str,
     pane: dict[str, str], hook_state: dict[str, Any], server_key: str,
@@ -613,13 +655,8 @@ def agent_metadata(
         if hook_agent != agent:
             hook_entry = {}
     processes = process_index.get((server_key, pane_id), [])
-    if (
-        command.startswith("python")
-        and isinstance(hook_entry, dict)
-        and hook_entry.get("managed_launcher")
-        and isinstance(hook_entry.get("session_id"), str)
-        and not processes
-    ):
+    managed_launcher = managed_launcher_matches_pane(agent, pane, hook_entry)
+    if managed_launcher and not processes:
         metadata = {
             "session_id": hook_entry["session_id"],
             "was_running": bool(hook_entry.get("busy")),
@@ -687,10 +724,7 @@ def agent_metadata(
             # Codex hooks can run inside the shared app-server daemon, which
             # records them under the pane that started the daemon. Only a
             # managed launcher still running in this pane wrote its own entry.
-            or (
-                hook_entry.get("managed_launcher")
-                and command.startswith("python")
-            )
+            or managed_launcher
         )
     ):
         # The cache is scoped by socket path, tmux server PID, and pane ID, so
@@ -745,7 +779,7 @@ def collect_snapshot(reason: str) -> dict[str, Any] | None:
         "socket_path", "pid", "session_id", "session_name", "session_group",
         "window_id", "window_index", "window_name", "window_active", "window_zoomed_flag",
         "window_layout",
-        "pane_id", "pane_index", "pane_current_path", "pane_active",
+        "pane_id", "pane_pid", "pane_index", "pane_current_path", "pane_active",
         "pane_current_command", "pane_title",
     ]
     topology = None
@@ -934,6 +968,8 @@ def record_managed_launcher(
     server_key = tmux_server_key(os.environ.get("TMUX"))
     if not pane_id or not server_key:
         return
+    launcher_pid = os.getpid()
+    launcher_status = process_stat(Path("/proc") / str(launcher_pid))
     with locked():
         state = load_hook_state()
         state["version"] = 3
@@ -945,6 +981,8 @@ def record_managed_launcher(
             "busy": busy,
             "launch_options": launch_options,
             "managed_launcher": True,
+            "launcher_pid": launcher_pid,
+            "launcher_start_ticks": launcher_status[3] if launcher_status is not None else None,
             "updated_at": now_iso(),
         }
         atomic_write_json(HOOK_STATE_PATH, state)
