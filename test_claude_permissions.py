@@ -23,7 +23,9 @@ OTHER_SESSION = "abcdef12-1234-1234-1234-123456789abc"
 def isolated_state(tmp_path, monkeypatch):
     monkeypatch.setattr(state, "STATE_DIR", tmp_path)
     monkeypatch.setattr(state, "LOCK_PATH", tmp_path / "lock")
+    monkeypatch.setattr(state, "HOOK_LOCK_PATH", tmp_path / "hook-lock")
     monkeypatch.setattr(state, "HOOK_STATE_PATH", tmp_path / "hooks.json")
+    monkeypatch.setattr(state, "LEGACY_HOOK_STATE_PATH", tmp_path / "legacy-hooks.json")
     monkeypatch.setattr(state, "tmux_server_key", lambda *args: "server")
     monkeypatch.setenv("TMUX_PANE", "%1")
     monkeypatch.setenv("TMUX", "/synthetic/socket,123,0")
