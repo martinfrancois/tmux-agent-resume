@@ -97,8 +97,14 @@ retry instructions.
 
 The default state directory is `~/.local/state/codex-tmux-resume`.
 `snapshot.json` holds the current layout and conversation metadata.
-`hook-state.json` holds agent hook records. The `recovery` directory retains
-the snapshot used for each boot, even after periodic snapshots change.
+The `recovery` directory retains the snapshot used for each boot, even after
+periodic snapshots change.
+
+Agent hook records live in `$XDG_RUNTIME_DIR/codex-tmux-resume/hook-state.json`,
+which the system clears at boot. Every record belongs to one boot, and a write
+to the state directory can stall longer than the 5-second hook timeout while
+the disk is busy. Without a runtime directory, the records stay in the state
+directory.
 
 Keep these state files on the machine. They contain local paths and conversation
 identifiers and are not repository source files.
@@ -137,6 +143,7 @@ rm ~/.config/systemd/user/codex-tmux-resume.service \
 systemctl --user daemon-reload
 python3 ~/.local/libexec/codex-tmux-resume/state.py remove-hooks
 rm -r ~/.local/libexec/codex-tmux-resume ~/.local/state/codex-tmux-resume
+rm -rf "${XDG_RUNTIME_DIR:?}/codex-tmux-resume"
 ```
 
 Running tmux sessions and agents keep running. Run

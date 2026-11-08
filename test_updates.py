@@ -153,8 +153,9 @@ class ManagedLauncherTests(unittest.TestCase):
              patch.dict(os.environ, {"TMUX_PANE": "%1", "TMUX": "/synthetic/socket,100,0"}), \
              patch.object(state, "tmux_server_key", return_value="server"), \
              patch.object(state.os, "getpid", return_value=123), \
-             patch.object(state, "LOCK_PATH", Path(directory) / "lock"), \
-             patch.object(state, "HOOK_STATE_PATH", Path(directory) / "hooks.json"):
+             patch.object(state, "HOOK_LOCK_PATH", Path(directory) / "hook-lock"), \
+             patch.object(state, "HOOK_STATE_PATH", Path(directory) / "hooks.json"), \
+             patch.object(state, "LEGACY_HOOK_STATE_PATH", Path(directory) / "legacy-hooks.json"):
             state.record_managed_launcher("codex", self.session_id, directory, True, [])
             entry = json.loads((Path(directory) / "hooks.json").read_text())["servers"]["server"]["panes"]["%1"]
         self.assertEqual(entry["launcher_pid"], 123)

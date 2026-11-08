@@ -31,10 +31,17 @@ HOME = Path.home()
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", HOME / ".codex")).expanduser()
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude")).expanduser()
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / APP
+RUNTIME_ROOT = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+# Hook records are keyed by boot ID, so they belong in the per-boot runtime
+# directory. On a disk under heavy writeback a single write there can stall
+# longer than the agents' hook timeout.
+HOOK_DIR = RUNTIME_ROOT / APP if os.access(RUNTIME_ROOT, os.W_OK | os.X_OK) else STATE_DIR
 SNAPSHOT_PATH = STATE_DIR / "snapshot.json"
-HOOK_STATE_PATH = STATE_DIR / "hook-state.json"
+HOOK_STATE_PATH = HOOK_DIR / "hook-state.json"
+LEGACY_HOOK_STATE_PATH = STATE_DIR / "hook-state.json"
 RESTORE_MARKER_PATH = STATE_DIR / "restored-boot.json"
 LOCK_PATH = STATE_DIR / "state.lock"
+HOOK_LOCK_PATH = HOOK_DIR / "hook-state.lock"
 RESTORE_LOCK_PATH = STATE_DIR / "restore.lock"
 CODEX_HOOKS_PATH = CODEX_HOME / "hooks.json"
 CLAUDE_SETTINGS_PATH = CLAUDE_HOME / "settings.json"
@@ -128,8 +135,7 @@ def boot_id() -> str | None:
         return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except OSError:
         pass
-    runtime_root = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
-    marker = runtime_root / APP / "boot-id"
+    marker = RUNTIME_ROOT / APP / "boot-id"
     try:
         marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         value = f"runtime-{uuid.uuid4()}"
@@ -145,10 +151,11 @@ def boot_id() -> str | None:
 
 
 @contextmanager
-def locked():
-    STATE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with LOCK_PATH.open("a+", encoding="utf-8") as handle:
-        os.chmod(LOCK_PATH, 0o600)
+def locked(path: Path | None = None):
+    path = path or LOCK_PATH
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        os.chmod(path, 0o600)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         yield
 
@@ -235,11 +242,33 @@ def rows(args: list[str], fields: list[str], *, check: bool = True) -> list[dict
     return query_rows(args, fields, check=check)[1]
 
 
+def hook_state_moved() -> bool:
+    return HOOK_STATE_PATH != LEGACY_HOOK_STATE_PATH
+
+
 def load_hook_state() -> dict[str, Any]:
-    state = read_json(HOOK_STATE_PATH, {"version": 3, "servers": {}})
+    migrating = hook_state_moved() and not HOOK_STATE_PATH.exists()
+    path = LEGACY_HOOK_STATE_PATH if migrating else HOOK_STATE_PATH
+    state = read_json(path, {"version": 3, "servers": {}})
     if not isinstance(state, dict) or not isinstance(state.get("servers"), dict):
         return {"version": 3, "servers": {}}
+    if migrating:
+        # Releases before the move kept every boot's records on disk; carry over this boot's.
+        current_boot = boot_id() or UNKNOWN_BOOT
+        state["servers"] = {
+            key: value for key, value in state["servers"].items()
+            if server_key_boot(key) == current_boot
+        }
     return state
+
+
+UNKNOWN_BOOT = "unknown-boot"
+
+
+def server_key_boot(key: str) -> str | None:
+    # Keys end in boot ID and start time; the socket path before them may contain commas.
+    parts = key.rsplit(",", 2)
+    return parts[1] if len(parts) == 3 else None
 
 
 def tmux_server_key(value: str | None, server_pid: str | None = None) -> str | None:
@@ -254,7 +283,7 @@ def tmux_server_key(value: str | None, server_pid: str | None = None) -> str | N
         socket_path = str(Path(socket_path).resolve())
     except OSError:
         pass
-    identity = [socket_path, server_pid or "unknown-pid", boot_id() or "unknown-boot"]
+    identity = [socket_path, server_pid or "unknown-pid", boot_id() or UNKNOWN_BOOT]
     if server_pid and server_pid.isdigit():
         status = process_stat(Path("/proc") / server_pid)
         identity.append(str(status[3]) if status is not None else "unknown-start")
@@ -898,6 +927,9 @@ def snapshot_command(args: argparse.Namespace) -> int:
             print("tmux was unavailable during shutdown; retained the previous snapshot.")
             return 0
         warn_about_codex_state(snapshot)
+        if hook_state_moved() and HOOK_STATE_PATH.exists():
+            # The snapshot service has no timeout, so it removes the migrated file instead of a hook.
+            LEGACY_HOOK_STATE_PATH.unlink(missing_ok=True)
         previous = read_json(SNAPSHOT_PATH, {})
         if isinstance(previous, dict) and semantic_snapshot(previous) == semantic_snapshot(snapshot):
             print(f"Snapshot unchanged ({len(snapshot['sessions'])} sessions); no disk write.")
@@ -918,7 +950,7 @@ def hook_command(args: argparse.Namespace) -> int:
     server_key = tmux_server_key(os.environ.get("TMUX"))
     session_id = event.get("session_id")
     if pane_id and server_key and isinstance(session_id, str):
-        with locked():
+        with locked(HOOK_LOCK_PATH):
             state = load_hook_state()
             state["version"] = 3
             server = state.setdefault("servers", {}).setdefault(server_key, {})
@@ -970,7 +1002,7 @@ def record_managed_launcher(
         return
     launcher_pid = os.getpid()
     launcher_status = process_stat(Path("/proc") / str(launcher_pid))
-    with locked():
+    with locked(HOOK_LOCK_PATH):
         state = load_hook_state()
         state["version"] = 3
         server = state.setdefault("servers", {}).setdefault(server_key, {})
