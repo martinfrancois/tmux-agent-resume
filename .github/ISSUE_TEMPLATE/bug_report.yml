@@ -1,0 +1,32 @@
+name: Bug report
+description: Report something that doesn't work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Leave out tokens, passwords, private paths, conversation contents and other personal data, also from logs, snapshots and screenshots.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The `state.py` command or the steps around a reboot that show the problem, ideally with an invented snapshot like `examples/snapshot.json`.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Commit, Linux distribution, Python, tmux, Codex CLI and Claude Code versions, and anything else that matters here.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      description: The command output or the `journalctl --user -u codex-tmux-resume.service -u codex-tmux-resume-snapshot.service` lines.
+      render: text
